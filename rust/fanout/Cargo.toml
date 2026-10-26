@@ -1,0 +1,17 @@
+[package]
+name = "fanout"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+datafusion = "54.0.0"
+futures = "0.3"
+map-lambda-client = { git = "https://github.com/tomwhite/map-lambda", rev = "3b60163" }
+object_store = { version = "0.13", features = ["aws"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+split = { path = "../split" }
+tokio = { version = "1", features = ["sync"] }
+url = "2"
+zarr-datafusion = { git = "https://github.com/stratoscale-io/zarr-datafusion", rev = "190e227" }

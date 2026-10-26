@@ -1,0 +1,26 @@
+[package]
+name = "split"
+version = "0.1.0"
+edition = "2021"
+
+# Keep datafusion and datafusion-proto at the version zarr-datafusion uses: a
+# fragment only decodes on the DataFusion version that encoded it.
+[dependencies]
+arrow = { version = "58", features = ["ipc"] }
+async-trait = "0.1"
+base64 = "0.22"
+datafusion = "54.0.0"
+datafusion-proto = "54.0.0"
+futures = "0.3"
+# the version zarr-datafusion's stores are built on
+object_store = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync"] }
+# the version zarr-datafusion's stores implement
+zarrs_storage = { version = "0.4", features = ["async"] }
+zarr-datafusion = { git = "https://github.com/stratoscale-io/zarr-datafusion", rev = "190e227", features = ["icechunk"] }
+
+[dev-dependencies]
+zarrs_object_store = "0.6"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }

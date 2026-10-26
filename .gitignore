@@ -1,0 +1,10 @@
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+rust/target/
+results/
+*.so
+# datafusion-cli history
+.history

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "coordinator",
+    "fanout",
+    "fragment",
+    "python",
+    "split",
+]
+# Only what `cargo lambda watch` serves, and what it shares: the extension is
+# built by maturin.
+default-members = [
+    "coordinator",
+    "fragment",
+    "split",
+]
+
+[profile.release]
+strip = true
+
+# zarr-datafusion fixes not yet upstream
+[patch."https://github.com/stratoscale-io/zarr-datafusion"]
+zarr-datafusion = { git = "https://github.com/tomwhite/zarr-datafusion", rev = "a731c9d" }

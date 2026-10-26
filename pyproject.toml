@@ -1,0 +1,59 @@
+[project]
+name = "datafusion-lambda-benchmarks"
+version = "0.1.0"
+authors = [
+    { name = "Tom White", email = "tom.e.white@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "boto3>=1.40.61",
+    "map-lambda",
+    "numpy",
+    "pyarrow",
+]
+
+[tool.uv.sources]
+map-lambda = { git = "https://github.com/tomwhite/map-lambda", rev = "3b60163" }
+
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+manifest-path = "rust/python/Cargo.toml"
+module-name = "datafusion_lambda_benchmarks._native"
+python-source = "."
+include = [{ path = "datafusion_lambda_benchmarks/**/*.py", format = "sdist" }]
+
+[tool.uv]
+# rebuild the extension when the Rust it is built from changes
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "rust/Cargo.lock" },
+    { file = "rust/{fanout,python,split}/**/*.rs" },
+    { file = "rust/{fanout,python,split}/Cargo.toml" },
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "lambda_integration: requires a local `cargo lambda watch` server",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[dependency-groups]
+dev = [
+    "datafusion>=55.0.0",
+    "icechunk>=2",
+    "map-lambda[diagnostics]",
+    "pytest>=9.1.1",
+    "ruff>=0.16.5",
+    "zarr>=3",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["datafusion_lambda_benchmarks"]
