@@ -1,8 +1,9 @@
 //! Fanning a query out on map-lambda. [`FanOutRule`] cuts a physical plan at
 //! each partial aggregate over a Zarr scan, and [`MapLambdaZarrExec`] runs what it
 //! cut off on `fragment` lambdas, a run of chunks each, streaming the partial
-//! states back to the rest of the plan as workers finish. A plan with nothing
-//! to cut runs in this process.
+//! states back to the rest of the plan as workers finish. When no group's rows
+//! span two invocations, the final aggregate runs on the workers too. A plan
+//! with nothing to cut runs in this process.
 
 pub mod region;
 
@@ -11,12 +12,16 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use datafusion::arrow::array::{AsArray, UInt64Array};
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::UInt64Type;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::config::ConfigOptions;
+use datafusion::datasource::sink::DataSinkExec;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::TaskContext;
+use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_plan::aggregates::{AggregateExec, AggregateMode};
@@ -26,13 +31,16 @@ use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     collect, DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream,
 };
 use datafusion::prelude::SessionContext;
-use futures::TryStreamExt;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
 use map_lambda_client::{Lambda, Lambdas, Transport};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -40,6 +48,9 @@ use split::PartitionSpec;
 use zarr_datafusion::optimizer::CardinalityRule;
 use zarr_datafusion::physical_plan::partition::split_selection;
 use zarr_datafusion::physical_plan::zarr_exec::ZarrExec;
+use zarr_datafusion::reader::filter::CoordSelection;
+use zarr_datafusion::reader::schema_inference::{ZarrArrayMeta, ZarrStoreMeta};
+use zarr_datafusion::writer::{create_skeleton, SkeletonSpec, ZarrDataSink};
 
 /// Where fragments run, and how many at once.
 #[derive(Debug, Clone)]
@@ -201,7 +212,14 @@ impl PhysicalOptimizerRule for FanOutRule {
         _config: &ConfigOptions,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         plan.transform_up(|node| {
-            Ok(match self.cut(&node)? {
+            let exec = match self.cut(&node)? {
+                Some(exec) => Some(exec),
+                None => match finish(&node)? {
+                    Some(exec) => Some(exec),
+                    None => write(&node)?,
+                },
+            };
+            Ok(match exec {
                 Some(exec) => Transformed::yes(exec),
                 None => Transformed::no(node),
             })
@@ -220,21 +238,128 @@ impl PhysicalOptimizerRule for FanOutRule {
 
 impl FanOutRule {
     fn cut(&self, node: &Arc<dyn ExecutionPlan>) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        let partial = node
+        let Some(partial) = node
             .downcast_ref::<AggregateExec>()
-            .is_some_and(|a| *a.mode() == AggregateMode::Partial);
-        if !partial {
+            .filter(|a| *a.mode() == AggregateMode::Partial)
+        else {
             return Ok(None);
-        }
-        let Some(chunks) = chunkwise_scan(node).and_then(chunks) else {
+        };
+        let Some(scan) = chunkwise_scan(node) else {
             return Ok(None);
+        };
+        let Some(chunks) = chunks(scan) else {
+            return Ok(None);
+        };
+        let per_invocation = self.0.settings.chunks_per_invocation.max(1);
+        let (runs, whole_groups) = if groups_within_tiles(partial, scan, &chunks) {
+            by_tile(chunks, per_invocation)
+        } else {
+            let runs = chunks.chunks(per_invocation).map(<[_]>::to_vec).collect();
+            (runs, false)
         };
         Ok(Some(Arc::new(MapLambdaZarrExec::new(
             without_round_robin(node.clone())?,
-            chunks,
+            runs,
+            whole_groups,
             self.0.clone(),
         )?)))
     }
+}
+
+/// A final aggregate over a fan-out whose invocations each hold all of their
+/// groups' rows, moved onto the workers.
+fn finish(node: &Arc<dyn ExecutionPlan>) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    let Some(last) = node.downcast_ref::<AggregateExec>().filter(|a| {
+        matches!(
+            a.mode(),
+            AggregateMode::Final | AggregateMode::FinalPartitioned
+        )
+    }) else {
+        return Ok(None);
+    };
+    let mut input = last.input();
+    while input.is::<RepartitionExec>() || input.is::<CoalescePartitionsExec>() {
+        input = input.children()[0];
+    }
+    let Some(fan_out) = input
+        .downcast_ref::<MapLambdaZarrExec>()
+        .filter(|f| f.whole_groups)
+    else {
+        return Ok(None);
+    };
+    let plan = Arc::new(AggregateExec::try_new(
+        AggregateMode::Final,
+        last.group_expr().clone(),
+        last.aggr_expr().to_vec(),
+        last.filter_expr().to_vec(),
+        fan_out.plan.clone(),
+        last.input_schema(),
+    )?);
+    let mut finished =
+        MapLambdaZarrExec::new(plan, fan_out.runs.clone(), false, fan_out.fan_out.clone())?;
+    finished.finished = true;
+    Ok(Some(Arc::new(finished)))
+}
+
+/// A Zarr sink over a fan-out of finished rows, moved onto the workers, each
+/// writing the chunks its tiles fall in.
+fn write(node: &Arc<dyn ExecutionPlan>) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+    let Some(sink) = node.downcast_ref::<DataSinkExec>() else {
+        return Ok(None);
+    };
+    let mut input = sink.input();
+    loop {
+        let rowwise = input.is::<ProjectionExec>()
+            || input.is::<FilterExec>()
+            || input.is::<SortExec>()
+            || input.is::<SortPreservingMergeExec>()
+            || input.is::<RepartitionExec>()
+            || input.is::<CoalescePartitionsExec>()
+            || input.is::<CooperativeExec>();
+        if !rowwise {
+            break;
+        }
+        input = input.children()[0];
+    }
+    let Some(fan_out) = input
+        .downcast_ref::<MapLambdaZarrExec>()
+        .filter(|f| f.finished)
+    else {
+        return Ok(None);
+    };
+    let Some(zarr) = sink.sink().downcast_ref::<ZarrDataSink>() else {
+        return Ok(None);
+    };
+    if !fan_out.tiles_chunks(zarr.spec()) {
+        return Ok(None);
+    }
+    let fragment = Arc::new(DataSinkExec::new(
+        inline(sink.input().clone(), &fan_out.plan)?,
+        Arc::new(zarr.clone().writing_chunks()),
+        sink.sort_order().clone(),
+    ));
+    Ok(Some(Arc::new(MapLambdaZarrExec::new(
+        fragment,
+        fan_out.runs.clone(),
+        false,
+        fan_out.fan_out.clone(),
+    )?)))
+}
+
+/// `plan` with the fan-out in it replaced by the fragment it runs.
+fn inline(
+    plan: Arc<dyn ExecutionPlan>,
+    fragment: &Arc<dyn ExecutionPlan>,
+) -> Result<Arc<dyn ExecutionPlan>> {
+    if plan.is::<MapLambdaZarrExec>() {
+        return Ok(fragment.clone());
+    }
+    let children = plan
+        .children()
+        .into_iter()
+        .map(|child| inline(child.clone(), fragment))
+        .collect::<Result<_>>()?;
+    plan.with_new_children(children)
 }
 
 /// `fragment` without the round-robin repartitions planned for this process's
@@ -279,37 +404,133 @@ fn chunkwise_scan(partial: &Arc<dyn ExecutionPlan>) -> Option<&ZarrExec> {
     }
 }
 
-/// The scan's partitions cut into single chunks along the outer axis, less any
-/// that read nothing.
+/// The scan's partitions cut into single chunks, less any that read nothing.
 fn chunks(scan: &ZarrExec) -> Option<Vec<PartitionSpec>> {
     // No partitions means one unsliced read: VirtualiZarr, Icechunk, or a
     // limit, whose pushdown is only right over the whole table.
     if scan.limit().is_some() || scan.partitions().is_empty() {
         return None;
     }
+    let meta = scan.store_meta()?;
+    let var = meta.data_vars.first()?;
     // Unknown chunking (0) leaves each partition whole.
-    let chunk_len = scan
-        .store_meta()?
-        .data_vars
-        .first()?
+    let chunk_len = var
         .chunks
         .as_ref()
         .and_then(|c| c.first().copied())
         .unwrap_or(0);
+    let inner = inner_axes(scan, meta, var);
     Some(
         scan.partitions()
             .iter()
             .flat_map(|spec| {
+                let boxes = inner_boxes(&spec.extra, &inner);
                 split_selection(&spec.outer, chunk_len, usize::MAX)
                     .into_iter()
-                    .map(|outer| PartitionSpec {
-                        outer,
-                        extra: spec.extra.clone(),
+                    .flat_map(move |outer| {
+                        boxes.clone().into_iter().map(move |extra| PartitionSpec {
+                            outer: outer.clone(),
+                            extra,
+                        })
                     })
             })
             .filter(|spec| !spec.is_empty())
             .collect(),
     )
+}
+
+/// The inner axes to cut at chunk boundaries, as `(coordinate index, extent,
+/// chunk length)`: those of more than one chunk, and unfiltered, since a
+/// partition's selection on an axis replaces the filter's.
+fn inner_axes(
+    scan: &ZarrExec,
+    meta: &ZarrStoreMeta,
+    var: &ZarrArrayMeta,
+) -> Vec<(usize, u64, u64)> {
+    let (Some(dims), Some(chunks)) = (&var.dimensions, &var.chunks) else {
+        return vec![];
+    };
+    (1..var.shape.len())
+        .filter_map(|axis| {
+            let name = dims.get(axis)?;
+            let filtered = scan.coord_filters().is_some_and(|f| f.get(name).is_some());
+            let coord = meta.coords.iter().position(|c| &c.name == name)?;
+            let (extent, chunk) = (var.shape[axis], *chunks.get(axis)?);
+            (!filtered && chunk > 0 && extent > chunk).then_some((coord, extent, chunk))
+        })
+        .collect()
+}
+
+/// Each chunk-aligned box within `extra`, over the `inner` axes.
+fn inner_boxes(
+    extra: &[(usize, CoordSelection)],
+    inner: &[(usize, u64, u64)],
+) -> Vec<Vec<(usize, CoordSelection)>> {
+    let mut boxes = vec![extra.to_vec()];
+    for &(coord, extent, chunk) in inner {
+        let whole = CoordSelection::Range(0, extent as usize);
+        boxes = boxes
+            .into_iter()
+            .flat_map(|b| {
+                let selected = b
+                    .iter()
+                    .find(|(c, _)| *c == coord)
+                    .map_or(&whole, |(_, s)| s);
+                split_selection(selected, chunk, usize::MAX)
+                    .into_iter()
+                    .map(|piece| {
+                        let mut b = b.clone();
+                        b.retain(|(c, _)| *c != coord);
+                        b.push((coord, piece));
+                        b
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    boxes
+}
+
+/// Whether the partial aggregate groups by every inner axis its chunks are cut
+/// along, so that no group spans two tiles.
+fn groups_within_tiles(partial: &AggregateExec, scan: &ZarrExec, chunks: &[PartitionSpec]) -> bool {
+    let (Some(meta), Some(first)) = (scan.store_meta(), chunks.first()) else {
+        return false;
+    };
+    let keys: Vec<&str> = partial
+        .group_expr()
+        .expr()
+        .iter()
+        .filter_map(|(expr, _)| expr.downcast_ref::<Column>().map(Column::name))
+        .collect();
+    partial.group_expr().is_single()
+        && !first.extra.is_empty()
+        && first.extra.iter().all(|(coord, _)| {
+            meta.coords
+                .get(*coord)
+                .is_some_and(|c| keys.contains(&c.name.as_str()))
+        })
+}
+
+/// `chunks` dealt a tile at a time, through time, in runs of at most
+/// `per_invocation`, and whether each tile took only one.
+fn by_tile(
+    mut chunks: Vec<PartitionSpec>,
+    per_invocation: usize,
+) -> (Vec<Vec<PartitionSpec>>, bool) {
+    let tile = |spec: &PartitionSpec| {
+        let mut key: Vec<_> = spec.extra.iter().map(|(c, s)| (*c, s.as_range())).collect();
+        key.sort();
+        key
+    };
+    chunks.sort_by_cached_key(tile);
+    let stacks: Vec<_> = chunks.chunk_by(|a, b| tile(a) == tile(b)).collect();
+    let whole = stacks.iter().all(|stack| stack.len() <= per_invocation);
+    let runs = stacks
+        .into_iter()
+        .flat_map(|stack| stack.chunks(per_invocation).map(<[_]>::to_vec))
+        .collect();
+    (runs, whole)
 }
 
 /// What a fan-out did.
@@ -338,7 +559,11 @@ pub struct MapLambdaZarrExec {
     schema: SchemaRef,
     plan: Arc<dyn ExecutionPlan>,
     fragment: String,
-    chunks: Vec<PartitionSpec>,
+    runs: Vec<Vec<PartitionSpec>>,
+    /// Whether no group's rows span two runs.
+    whole_groups: bool,
+    /// Whether the fragment ends in the final aggregate.
+    finished: bool,
     fan_out: Arc<FanOut>,
     properties: Arc<PlanProperties>,
     report: Arc<Mutex<Report>>,
@@ -347,7 +572,8 @@ pub struct MapLambdaZarrExec {
 impl MapLambdaZarrExec {
     pub fn new(
         plan: Arc<dyn ExecutionPlan>,
-        chunks: Vec<PartitionSpec>,
+        runs: Vec<Vec<PartitionSpec>>,
+        whole_groups: bool,
         fan_out: Arc<FanOut>,
     ) -> Result<Self> {
         let schema = plan.schema();
@@ -362,7 +588,9 @@ impl MapLambdaZarrExec {
             schema,
             plan,
             fragment,
-            chunks,
+            runs,
+            whole_groups,
+            finished: false,
             fan_out,
             properties,
             report: Default::default(),
@@ -381,13 +609,54 @@ impl MapLambdaZarrExec {
 
     /// Each invocation's chunks.
     pub fn inputs(&self) -> Vec<Value> {
-        self.chunks
-            .chunks(self.fan_out.settings.chunks_per_invocation.max(1))
+        self.runs
+            .iter()
             .map(|run| {
                 serde_json::to_value(split::compact::compact(run))
                     .expect("partition specs serialize")
             })
             .collect()
+    }
+
+    fn chunks(&self) -> usize {
+        self.runs.iter().map(Vec::len).sum()
+    }
+
+    /// Whether each of `spec`'s chunks lies in one tile, so that one worker writes
+    /// it: along each axis the tiles are cut on, the grid is the whole source axis,
+    /// and its chunks divide the source's.
+    fn tiles_chunks(&self, spec: &SkeletonSpec) -> bool {
+        let Some(tile) = self.runs.first().and_then(|run| run.first()) else {
+            return false;
+        };
+        let scans = split::zarr_scans(&self.plan).unwrap_or_default();
+        let Some(meta) = scans
+            .first()
+            .and_then(|scan| scan.downcast_ref::<ZarrExec>())
+            .and_then(ZarrExec::store_meta)
+        else {
+            return false;
+        };
+        let Some(var) = meta.data_vars.first() else {
+            return false;
+        };
+        tile.extra.iter().all(|(coord, _)| {
+            let name = &meta.coords[*coord].name;
+            let source_chunk = var
+                .dimensions
+                .as_ref()
+                .and_then(|dims| dims.iter().position(|d| d == name))
+                .and_then(|axis| var.chunks.as_ref()?.get(axis).copied());
+            let extent = meta.coords[*coord].shape.first().copied();
+            let axis = spec.coords.iter().position(|c| &c.name == name);
+            match (source_chunk, extent, axis) {
+                (Some(source_chunk), Some(extent), Some(axis)) => {
+                    spec.coords[axis].values.len() as u64 == extent
+                        && source_chunk % spec.chunks[axis] == 0
+                }
+                _ => false,
+            }
+        })
     }
 
     pub fn report(&self) -> Report {
@@ -408,20 +677,15 @@ impl MapLambdaZarrExec {
 impl DisplayAs for MapLambdaZarrExec {
     fn fmt_as(&self, t: DisplayFormatType, f: &mut fmt::Formatter) -> fmt::Result {
         let function = &self.fan_out.settings.worker_function;
-        let invocations = self
-            .chunks
-            .len()
-            .div_ceil(self.fan_out.settings.chunks_per_invocation.max(1));
+        let (chunks, invocations) = (self.chunks(), self.runs.len());
         match t {
             DisplayFormatType::Default | DisplayFormatType::Verbose => write!(
                 f,
-                "MapLambdaZarrExec: function={function}, chunks={}, invocations={invocations}",
-                self.chunks.len()
+                "MapLambdaZarrExec: function={function}, chunks={chunks}, invocations={invocations}",
             ),
             DisplayFormatType::TreeRender => write!(
                 f,
-                "function={function}\nchunks={}\ninvocations={invocations}",
-                self.chunks.len()
+                "function={function}\nchunks={chunks}\ninvocations={invocations}",
             ),
         }
     }
@@ -469,16 +733,12 @@ impl ExecutionPlan for MapLambdaZarrExec {
     ) -> Result<SendableRecordBatchStream> {
         let inputs = self.inputs();
         *self.report.lock().expect("unpoisoned") = Report {
-            chunks: self.chunks.len(),
+            chunks: self.chunks(),
             invocations: inputs.len(),
             ..Report::default()
         };
         if inputs.is_empty() {
-            let none = futures::stream::empty();
-            return Ok(Box::pin(RecordBatchStreamAdapter::new(
-                self.schema.clone(),
-                none,
-            )));
+            return Ok(self.answer(futures::stream::empty().boxed()));
         }
 
         let settings = &self.fan_out.settings;
@@ -492,8 +752,20 @@ impl ExecutionPlan for MapLambdaZarrExec {
                 .collect()
         };
         let (fan_out, template) = (self.fan_out.clone(), self.template());
+        // The workers each write their own chunks to a store made here first.
+        let store = self
+            .plan
+            .downcast_ref::<DataSinkExec>()
+            .and_then(|sink| sink.sink().downcast_ref::<ZarrDataSink>())
+            .map(|zarr| (zarr.store_path().to_string(), zarr.spec().clone()));
         let run = futures::stream::once(async move {
             region::check(&locations).await?;
+            if let Some((path, spec)) = store {
+                tokio::task::spawn_blocking(move || create_skeleton(&path, &spec))
+                    .await
+                    .map_err(external)?
+                    .map_err(DataFusionError::External)?;
+            }
             let worker = &fan_out.settings.worker_function;
             Ok::<_, DataFusionError>(
                 fan_out
@@ -551,10 +823,35 @@ impl ExecutionPlan for MapLambdaZarrExec {
                 futures::future::ready(decoded)
             })
             .try_flatten();
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema.clone(),
-            batches,
-        )))
+        Ok(self.answer(batches.boxed()))
+    }
+}
+
+impl MapLambdaZarrExec {
+    /// The workers' batches, or when they write, one count of the rows they
+    /// wrote, as the sink they each ran would answer.
+    fn answer(
+        &self,
+        batches: BoxStream<'static, Result<RecordBatch>>,
+    ) -> SendableRecordBatchStream {
+        let schema = self.schema.clone();
+        if !self.plan.is::<DataSinkExec>() {
+            return Box::pin(RecordBatchStreamAdapter::new(schema, batches));
+        }
+        let total = futures::stream::once({
+            let schema = schema.clone();
+            async move {
+                let written = batches
+                    .try_fold(0, |total, batch| async move {
+                        let counts = batch.column(0).as_primitive::<UInt64Type>();
+                        Ok(total + counts.iter().flatten().sum::<u64>())
+                    })
+                    .await?;
+                let count = Arc::new(UInt64Array::from(vec![written]));
+                Ok(RecordBatch::try_new(schema, vec![count])?)
+            }
+        });
+        Box::pin(RecordBatchStreamAdapter::new(schema, total))
     }
 }
 

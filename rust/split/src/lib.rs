@@ -29,6 +29,7 @@ use zarr_datafusion::physical_plan::zarr_exec::{CachedRemoteStore, StoreKind, Za
 use zarr_datafusion::reader::icechunk_store::{open_icechunk_async, open_icechunk_remote};
 use zarr_datafusion::reader::schema_inference::infer_schema_with_meta_async;
 use zarr_datafusion::reader::storage::{create_async_store, is_remote_url};
+use zarr_datafusion::writer::ZarrFormatFactory;
 use zarrs_storage::AsyncReadableListableStorage;
 
 pub use zarr_datafusion::physical_plan::partition::PartitionSpec;
@@ -60,7 +61,10 @@ pub fn session_from(
     builder: SessionStateBuilder,
     target_partitions: Option<usize>,
 ) -> SessionContext {
-    let state = builder.build();
+    let mut state = builder.build();
+    state
+        .register_file_format(Arc::new(ZarrFormatFactory), true)
+        .expect("registers");
     let mut config = state.config().clone().with_information_schema(true);
     if let Some(n) = target_partitions {
         config = config.with_target_partitions(n);

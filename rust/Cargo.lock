@@ -6382,7 +6382,7 @@ dependencies = [
 [[package]]
 name = "zarr-datafusion"
 version = "0.1.1"
-source = "git+https://github.com/stratoscale-io/zarr-datafusion?rev=8aa1e2f#8aa1e2f4030c3b7a2cb5c2db027ba19b0c583c3f"
+source = "git+https://github.com/tomwhite/zarr-datafusion?rev=6a3ab08#6a3ab08b4b58b2a75fb871feabd4f224e6689d55"
 dependencies = [
  "arrow",
  "async-trait",

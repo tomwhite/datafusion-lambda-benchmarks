@@ -17,3 +17,7 @@ default-members = [
 
 [profile.release]
 strip = true
+
+# zarr-datafusion's Zarr writes from the workers, not yet upstream
+[patch."https://github.com/stratoscale-io/zarr-datafusion"]
+zarr-datafusion = { git = "https://github.com/tomwhite/zarr-datafusion", rev = "6a3ab08" }

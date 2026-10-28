@@ -5,8 +5,12 @@ How fast can we query ERA5 Zarr data using SQL and the [map-lambda](https://gith
 **The monthly area-weighted global mean temperature over 85 years of hourly
 ERA5 (745,128 chunks, 3.1 TB uncompressed) takes ~88s and costs ~$2.17**
 
-The answer matches xarray for a sample month, and the global means Copernicus
-publishes from ERA5 to within 0.001°C for all but one of the ~1000 months.
+**The hourly climatology of every grid cell over the same ERA5 record, written to
+Zarr on S3, takes ~136s and costs ~$3.07**
+
+Both answers match xarray for a sample, and the global means match those
+Copernicus publishes from ERA5 to within 0.001°C for all but one of the ~1000
+months.
 
 ## How it works
 
@@ -14,18 +18,21 @@ A query is planned by [DataFusion](https://datafusion.apache.org/), over Zarr
 arrays flattened into tables by [zarr-datafusion](https://github.com/stratoscale-io/zarr-datafusion).
 
 A new physical operator `MapLambdaZarrExec` is used to run partial
-aggregates on Lambda workers. The partial aggregate results for each worker
-are streamed back to the client which completes the rest of the plan.
+aggregates on Lambda workers. For the global means, the partial aggregate results
+for each worker are streamed back to the client which completes the rest of the plan.
+
+For the climatology, each worker processes all of a group's rows, so it runs
+the final aggregate, and writes the output itself.
 
 This project is set up for running benchmarks, it is not a general purpose SQL engine.
 
 ## Dependencies
 
-Both map-lambda and zarr-datafusion are build from pinned versions on GitHub.
+Both map-lambda and zarr-datafusion are built from pinned versions on GitHub.
 
-zarr-datafusion comes from the `lambda-demo` branch of a fork,
+zarr-datafusion comes from the `lambda-zarr-write` branch of a fork,
 <https://github.com/tomwhite/zarr-datafusion>, pinned to a commit, until its
-fixes are merged upstream.
+Zarr writes are merged upstream.
 
 ## Running locally
 
@@ -46,13 +53,12 @@ cd rust && cargo test
 
 ## Running on AWS
 
-### Deployment
-
-The demo data is in us-east-1, so the workers must be there too (the query
-refuses to run otherwise):
+The data is in us-east-1, so the workers must be there too (a query refuses
+to run otherwise). `OUTPUT_BUCKET` is only needed for the climatology, which
+the workers write to:
 
 ```shell
-./aws/setup-roles.sh   # once - wait a few seconds for IAM to apply
+OUTPUT_BUCKET=<bucket> ./aws/setup-roles.sh   # once - wait a few seconds for IAM to apply
 AWS_REGION=us-east-1 ./aws/deploy.sh
 ./aws/teardown.sh      # when you're finished
 ```
@@ -64,9 +70,12 @@ so export as follows:
 eval "$(aws configure export-credentials --format env)"; export AWS_REGION=us-east-1
 ```
 
-### The demo
+Each benchmark below saves its run to `results/`, with a timeline of its
+invocations.
 
-The demo script computates the monthly area-weighted global mean of `t2m`
+## Global mean temperature
+
+`benchmarks/demo.py` computes the monthly area-weighted global mean of `t2m`
 over [Earthmover's ERA5](https://registry.opendata.aws/earthmover-era5/),
 dataset in Icechunk format. The full dataset goes back to 1940, but the
 script accepts a time range to allow you to query part of it.
@@ -137,6 +146,60 @@ AggregateExec: mode=Partial, gby=[date_trunc(month, CAST(valid_time@1 AS Timesta
 
 Each worker binds the fragment's `ZarrExec` to its own chunks, and returns
 one partial row per month it touches.
+
+## Hourly climatology
+
+`benchmarks/climatology.py` computes the mean `t2m` of every grid cell for
+each hour of the day, over the same ERA5 in its time-series layout
+(`single/temporal`), where a chunk is a "pencil": a year of hours (8,736) over
+a 12 x 12 tile. The output is 24 x 721 x 1440 cells, written by the workers to
+a Zarr store with a chunk a tile:
+
+```sql
+COPY (
+  SELECT latitude, longitude,
+         date_part('hour', CAST(valid_time AS TIMESTAMP)) AS hour,
+         avg(t2m) AS clim, count(*) AS n
+  FROM era5
+  WHERE valid_time >= TIMESTAMP '{start}' AND valid_time < TIMESTAMP '{end}'
+  GROUP BY 1, 2, 3
+) TO 's3://<bucket>/climatology.zarr' STORED AS ZARR OPTIONS ('chunks' '24,12,12')
+```
+
+Each of the 7,320 invocations takes one tile's whole stack of pencils, so its
+rows are final: it finishes the aggregate, writes its tile's chunk, and
+returns only a count.
+
+By default it runs over a week, which is useful for checking it works first
+(costs about $0.12).
+
+```shell
+uv run python benchmarks/climatology.py s3://<bucket>/climatology-week.zarr
+```
+
+Then the whole record:
+
+```shell
+uv run python benchmarks/climatology.py s3://<bucket>/climatology.zarr --start 1940-01-01 --end 2026-01-01
+```
+
+In one run, the whole record took 135.8s and cost approximately $3.07: 7,320
+invocations of 87 pencils, in about 7.4 waves at a concurrency of 990. The
+cost includes about $0.07 for the workers' ~14,640 writes to the output, which
+the run's report leaves out.
+
+<img src="./era5-climatology-c990-timeline.svg">
+
+### Checking the results
+
+```shell
+# one tile, 57.25 to 60°N and 0 to 2.75°E, against xarray reading the same pencils
+uv run --with xarray --with "numcodecs[pcodec]" --with obstore python benchmarks/climatology_check.py \
+  --output s3://<bucket>/climatology.zarr --start 1940-01-01 --end 2026-01-01
+```
+
+The tile matches xarray exactly. The check reads the tile's chunk alone, in
+about 2 seconds.
 
 ## AI usage
 
