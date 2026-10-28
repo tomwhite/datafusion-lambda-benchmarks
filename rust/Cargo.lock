@@ -1257,15 +1257,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "coordinator"
-version = "0.1.0"
-dependencies = [
- "lambda_runtime",
- "map-lambda-coordinator",
- "tokio",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2243,6 +2234,15 @@ dependencies = [
  "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
+]
+
+[[package]]
+name = "dispatcher"
+version = "0.1.0"
+dependencies = [
+ "lambda_runtime",
+ "map-lambda-dispatcher",
+ "tokio",
 ]
 
 [[package]]
@@ -3624,7 +3624,7 @@ dependencies = [
 [[package]]
 name = "map-lambda-client"
 version = "0.1.0"
-source = "git+https://github.com/tomwhite/map-lambda?rev=3b60163#3b601630ad41989753c6d31ae05b64bc10e980fa"
+source = "git+https://github.com/tomwhite/map-lambda?rev=b31474f#b31474fb89551cad38f63e4ada6a0ea6340746c9"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -3639,9 +3639,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "map-lambda-coordinator"
+name = "map-lambda-dispatcher"
 version = "0.1.0"
-source = "git+https://github.com/tomwhite/map-lambda?rev=3b60163#3b601630ad41989753c6d31ae05b64bc10e980fa"
+source = "git+https://github.com/tomwhite/map-lambda?rev=b31474f#b31474fb89551cad38f63e4ada6a0ea6340746c9"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -3660,7 +3660,7 @@ dependencies = [
 [[package]]
 name = "map-lambda-protocol"
 version = "0.1.0"
-source = "git+https://github.com/tomwhite/map-lambda?rev=3b60163#3b601630ad41989753c6d31ae05b64bc10e980fa"
+source = "git+https://github.com/tomwhite/map-lambda?rev=b31474f#b31474fb89551cad38f63e4ada6a0ea6340746c9"
 dependencies = [
  "serde",
  "serde_json",
@@ -6382,7 +6382,7 @@ dependencies = [
 [[package]]
 name = "zarr-datafusion"
 version = "0.1.1"
-source = "git+https://github.com/tomwhite/zarr-datafusion?rev=a731c9d#a731c9d18d6c1b816b1508d85ee1f394c52487f6"
+source = "git+https://github.com/stratoscale-io/zarr-datafusion?rev=8aa1e2f#8aa1e2f4030c3b7a2cb5c2db027ba19b0c583c3f"
 dependencies = [
  "arrow",
  "async-trait",

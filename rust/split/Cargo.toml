@@ -19,7 +19,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync"] }
 # the version zarr-datafusion's stores implement
 zarrs_storage = { version = "0.4", features = ["async"] }
-zarr-datafusion = { git = "https://github.com/stratoscale-io/zarr-datafusion", rev = "190e227", features = ["icechunk"] }
+zarr-datafusion = { git = "https://github.com/stratoscale-io/zarr-datafusion", rev = "8aa1e2f", features = ["icechunk"] }
 
 [dev-dependencies]
 zarrs_object_store = "0.6"

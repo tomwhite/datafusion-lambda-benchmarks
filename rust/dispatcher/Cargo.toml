@@ -1,17 +1,17 @@
 [package]
-name = "coordinator"
+name = "dispatcher"
 version = "0.1.0"
 edition = "2021"
 
-# The coordinator itself lives in map-lambda, but build and deploy it
+# The dispatcher itself lives in map-lambda, but build and deploy it
 # here so that `cargo lambda watch` can serve it alongside this project's
 # own worker functions.
-# Keep in sync with map-lambda's coordinator.
+# Keep in sync with map-lambda's dispatcher.
 [package.metadata.lambda.deploy]
 memory = 3538
 timeout = 900
 
 [dependencies]
 lambda_runtime = "1.0.1"
-map-lambda-coordinator = { git = "https://github.com/tomwhite/map-lambda", rev = "3b60163" }
+map-lambda-dispatcher = { git = "https://github.com/tomwhite/map-lambda", rev = "b31474f" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

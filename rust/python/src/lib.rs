@@ -30,7 +30,7 @@ impl Session {
         tables,
         endpoint_url = None,
         concurrency = 1000,
-        coordinators = None,
+        dispatchers = None,
         chunks_per_invocation = 1,
         chunks_in_flight = None,
         allow_cross_region = false,
@@ -43,7 +43,7 @@ impl Session {
         tables: HashMap<String, (String, BTreeMap<String, String>)>,
         endpoint_url: Option<String>,
         concurrency: usize,
-        coordinators: Option<usize>,
+        dispatchers: Option<usize>,
         chunks_per_invocation: usize,
         chunks_in_flight: Option<usize>,
         allow_cross_region: bool,
@@ -57,7 +57,7 @@ impl Session {
         let runtime = tokio::runtime::Runtime::new().map_err(err)?;
         let settings = Settings {
             concurrency,
-            coordinators,
+            dispatchers,
             endpoint_url,
             chunks_per_invocation,
             chunks_in_flight,

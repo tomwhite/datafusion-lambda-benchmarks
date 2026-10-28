@@ -31,7 +31,7 @@ fixes are merged upstream.
 
 First start `cargo lambda watch` from the `rust/` directory, building first,
 because `watch` compiles a function on its first request, which would outlast
-the coordinator's invoke timeout:
+the dispatcher's invoke timeout:
 
 ```shell
 cd rust && cargo build && cargo lambda watch

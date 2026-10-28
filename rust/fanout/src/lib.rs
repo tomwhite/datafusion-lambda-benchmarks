@@ -8,7 +8,6 @@ pub mod region;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -34,7 +33,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::SessionContext;
 use futures::TryStreamExt;
-use map_lambda_client::{dispatch, Call, Lambda, Transport};
+use map_lambda_client::{Lambda, Lambdas, Transport};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use split::PartitionSpec;
@@ -45,15 +44,15 @@ use zarr_datafusion::physical_plan::zarr_exec::ZarrExec;
 /// Where fragments run, and how many at once.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub coordinator_function: String,
+    pub dispatcher_function: String,
     pub worker_function: String,
     /// Worker invocations in flight.
     pub concurrency: usize,
-    /// How many coordinators share them, or the fewest that hold them. Each
+    /// How many dispatchers share them, or the fewest that hold them. Each
     /// streams its workers' results back at 2 MB/s after its first 6 MB.
-    pub coordinators: Option<usize>,
+    pub dispatchers: Option<usize>,
     pub retries: usize,
-    /// A local `cargo lambda watch`, for coordinators and workers both.
+    /// A local `cargo lambda watch`, for dispatchers and workers both.
     pub endpoint_url: Option<String>,
     pub chunks_per_invocation: usize,
     /// How many of an invocation's chunks a worker runs at once, else its default.
@@ -68,10 +67,10 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            coordinator_function: "coordinator".into(),
+            dispatcher_function: "dispatcher".into(),
             worker_function: "fragment".into(),
             concurrency: 1000,
-            coordinators: None,
+            dispatchers: None,
             retries: 2,
             endpoint_url: None,
             chunks_per_invocation: 1,
@@ -82,11 +81,10 @@ impl Default for Settings {
     }
 }
 
-/// A map-lambda client and the settings its fan-outs run with.
+/// A map-lambda session and the settings its fan-outs run with.
 pub struct FanOut {
-    transport: Arc<dyn Transport>,
+    lambdas: Lambdas,
     settings: Settings,
-    calls: AtomicUsize,
 }
 
 impl fmt::Debug for FanOut {
@@ -99,11 +97,14 @@ impl fmt::Debug for FanOut {
 
 impl FanOut {
     pub fn new(transport: Arc<dyn Transport>, settings: Settings) -> Self {
-        Self {
-            transport,
-            settings,
-            calls: AtomicUsize::new(0),
-        }
+        let mut calls = map_lambda_client::Settings::default();
+        calls.dispatcher_function = settings.dispatcher_function.clone();
+        calls.dispatchers = settings.dispatchers;
+        calls.concurrency = settings.concurrency;
+        calls.retries = settings.retries;
+        calls.return_stats = settings.return_stats;
+        let lambdas = Lambdas::new(transport, settings.endpoint_url.clone()).with_settings(calls);
+        Self { lambdas, settings }
     }
 
     /// Against real Lambda, or the emulator at `settings.endpoint_url`.
@@ -323,9 +324,9 @@ pub struct Report {
     /// With `return_stats`: each worker's `index`, `timings_ms`,
     /// `s3_requests` and `chunks_in_flight`.
     pub workers: Vec<Value>,
-    /// Each coordinator's record.
-    pub coordinator_stats: Vec<Value>,
-    /// With `return_stats`: each frame from the coordinators as it arrived
+    /// Each dispatcher's record.
+    pub dispatcher_stats: Vec<Value>,
+    /// With `return_stats`: each frame from the dispatchers as it arrived
     /// here, `at_s` from dispatching, with its workers' result `bytes`.
     pub arrivals: Vec<Value>,
 }
@@ -393,26 +394,14 @@ impl MapLambdaZarrExec {
         self.report.lock().expect("unpoisoned").clone()
     }
 
-    fn call(&self) -> Call {
-        let settings = &self.fan_out.settings;
+    /// What every invocation is sent besides its chunks.
+    fn template(&self) -> Map<String, Value> {
         let mut template =
             Map::from_iter([("plan".to_string(), Value::from(self.fragment.clone()))]);
-        if let Some(n) = settings.chunks_in_flight {
+        if let Some(n) = self.fan_out.settings.chunks_in_flight {
             template.insert("chunks_in_flight".into(), n.into());
         }
-        Call {
-            coordinator_function: settings.coordinator_function.clone(),
-            target_function: settings.worker_function.clone(),
-            input_key: "partitions".into(),
-            template,
-            coordinators: settings.coordinators,
-            concurrency: settings.concurrency,
-            retries: settings.retries,
-            endpoint_url: settings.endpoint_url.clone(),
-            return_outputs: true,
-            return_stats: settings.return_stats,
-            call: self.fan_out.calls.fetch_add(1, Ordering::Relaxed),
-        }
+        template
     }
 }
 
@@ -502,11 +491,14 @@ impl ExecutionPlan for MapLambdaZarrExec {
                 .map(|scan| scan.path().to_string())
                 .collect()
         };
-        let (transport, call) = (self.fan_out.transport.clone(), self.call());
+        let (fan_out, template) = (self.fan_out.clone(), self.template());
         let run = futures::stream::once(async move {
             region::check(&locations).await?;
+            let worker = &fan_out.settings.worker_function;
             Ok::<_, DataFusionError>(
-                dispatch(transport, call, inputs)
+                fan_out
+                    .lambdas
+                    .map_unordered(worker, inputs, "partitions", template)
                     .map_err(external)?
                     .map_err(external),
             )
@@ -517,38 +509,44 @@ impl ExecutionPlan for MapLambdaZarrExec {
         let started = Instant::now();
         let batches = run
             .and_then(move |batch| {
-                let mut report = report.lock().expect("unpoisoned");
-                report.elapsed_s = started.elapsed().as_secs_f64();
-                report
-                    .coordinator_stats
-                    .extend(batch.coordinators.iter().map(to_value));
-                if return_stats {
-                    let bytes: usize = batch
-                        .outputs
-                        .iter()
-                        .map(|(_, output)| output["batches"].as_str().map_or(0, str::len))
-                        .sum();
-                    let at_s = report.elapsed_s;
-                    report.arrivals.push(json!({"at_s": at_s, "bytes": bytes}));
-                    report
-                        .invocation_stats
-                        .extend(batch.invocations.iter().map(to_value));
-                    report
-                        .workers
-                        .extend(batch.outputs.iter().map(|(index, output)| {
-                            json!({
-                                "index": index,
-                                "timings_ms": output["timings_ms"],
-                                "s3_requests": output["s3_requests"],
-                                "chunks_in_flight": output["chunks_in_flight"],
-                            })
-                        }));
-                }
                 let decoded = batch
-                    .outputs
+                    .answers
                     .iter()
-                    .map(|(_, output)| decode(output))
+                    .map(|(index, answer)| {
+                        let answer: Value = serde_json::from_str(answer.get()).map_err(external)?;
+                        Ok((*index, answer))
+                    })
                     .collect::<Result<Vec<_>>>()
+                    .and_then(|answers| {
+                        let mut report = report.lock().expect("unpoisoned");
+                        report.elapsed_s = started.elapsed().as_secs_f64();
+                        report
+                            .dispatcher_stats
+                            .extend(batch.dispatcher_stats.iter().map(to_value));
+                        if return_stats {
+                            let bytes: usize = answers
+                                .iter()
+                                .map(|(_, answer)| answer["batches"].as_str().map_or(0, str::len))
+                                .sum();
+                            let at_s = report.elapsed_s;
+                            report.arrivals.push(json!({"at_s": at_s, "bytes": bytes}));
+                            report
+                                .invocation_stats
+                                .extend(batch.invocation_stats.iter().map(to_value));
+                            report.workers.extend(answers.iter().map(|(index, answer)| {
+                                json!({
+                                    "index": index,
+                                    "timings_ms": answer["timings_ms"],
+                                    "s3_requests": answer["s3_requests"],
+                                    "chunks_in_flight": answer["chunks_in_flight"],
+                                })
+                            }));
+                        }
+                        answers
+                            .iter()
+                            .map(|(_, answer)| decode(answer))
+                            .collect::<Result<Vec<_>>>()
+                    })
                     .map(|batches| futures::stream::iter(batches.into_iter().flatten().map(Ok)));
                 futures::future::ready(decoded)
             })

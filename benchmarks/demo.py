@@ -113,7 +113,7 @@ def settings(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "endpoint_url": LOCAL_ENDPOINT_URL if args.local else None,
         "concurrency": args.concurrency,
-        "coordinators": args.coordinators,
+        "dispatchers": args.dispatchers,
         "chunks_per_invocation": args.chunks_per_invocation,
         "chunks_in_flight": args.chunks_in_flight,
         "allow_cross_region": args.allow_cross_region,
@@ -132,7 +132,7 @@ def main() -> None:
     parser.add_argument("--start", type=datetime.fromisoformat, default=datetime(2020, 1, 1))
     parser.add_argument("--end", type=datetime.fromisoformat, default=datetime(2020, 4, 1))
     parser.add_argument("--concurrency", type=int, default=1000)
-    parser.add_argument("--coordinators", type=int)
+    parser.add_argument("--dispatchers", type=int)
     parser.add_argument("--chunks-per-invocation", type=int, default=24)
     parser.add_argument("--chunks-in-flight", type=int)
     parser.add_argument(

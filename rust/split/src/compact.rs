@@ -1,7 +1,7 @@
 //! An invocation's partitions as sent to its worker. Consecutive ranges of
 //! one width along the outer axis are sent as one: with a chunk a partition,
 //! an invocation of hourly chunks would otherwise send a spec an hour, and a
-//! fan-out's request to its coordinator grew with its chunks, not its
+//! fan-out's request to its dispatcher grew with its chunks, not its
 //! invocations.
 
 use serde::{Deserialize, Serialize};

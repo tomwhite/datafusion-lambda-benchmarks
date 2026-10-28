@@ -161,12 +161,12 @@ def test_every_invocation_has_its_workers_measurements(era5):
 
 
 @pytest.mark.lambda_integration
-def test_coordinators_share_the_invocations_with_the_same_answer(era5):
-    result = run(QUERIES[0], {"era5": era5}, **LOCAL, coordinators=3, return_stats=True)
+def test_dispatchers_share_the_invocations_with_the_same_answer(era5):
+    result = run(QUERIES[0], {"era5": era5}, **LOCAL, dispatchers=3, return_stats=True)
 
     [report] = result.reports
-    assert len(report["coordinator_stats"]) == 3
-    assert sum(c["dispatched"] for c in report["coordinator_stats"]) == result.invocations
+    assert len(report["dispatcher_stats"]) == 3
+    assert sum(c["dispatched"] for c in report["dispatcher_stats"]) == result.invocations
     rows_close(result.table.to_pylist(), query_locally(era5, QUERIES[0]))
 
 

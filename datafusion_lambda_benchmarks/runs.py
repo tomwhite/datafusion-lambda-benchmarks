@@ -16,7 +16,7 @@ from datafusion_lambda_benchmarks import cost, sql
 from datafusion_lambda_benchmarks.cloudwatch import join, query_all_reports, query_windows
 
 FUNCTION = "fragment"
-COORDINATOR = "coordinator"
+DISPATCHER = "dispatcher"
 
 
 def describe(name: str, values: list[float]) -> str:
@@ -30,7 +30,7 @@ def describe(name: str, values: list[float]) -> str:
 def run(query: str, tables: dict[str, sql.Table], **settings: Any) -> dict[str, Any]:
     """
     Run `query` as `sql.run` does, with one fan-out: its rows, and what each
-    invocation, worker and coordinator did.
+    invocation, worker and dispatcher did.
     """
     started = time.monotonic()
     result = sql.run(query, tables, return_stats=True, **settings)
@@ -47,7 +47,7 @@ def run(query: str, tables: dict[str, sql.Table], **settings: Any) -> dict[str, 
             }
             for r in report["invocation_stats"]
         ],
-        "coordinators": report["coordinator_stats"],
+        "dispatchers": report["dispatcher_stats"],
         "arrivals": report["arrivals"],
         "timings": [w["timings_ms"] for w in report["workers"]],
         "chunks_in_flight": sorted({w["chunks_in_flight"] for w in report["workers"]}),
@@ -63,7 +63,7 @@ def print_run(result: dict[str, Any], concurrency: int, expected: int, chunk_byt
     print(
         f"{result['chunks']:,} chunks after pruning (expected {expected:,}), "
         f"{len(result['invocations']):,} invocations at concurrency {concurrency} "
-        f"through {len(result['coordinators'])} coordinator(s)"
+        f"through {len(result['dispatchers'])} dispatcher(s)"
     )
     print(
         f"wall {wall:.1f}s: fan-out {result['fan_out_s']:.1f}s, "
@@ -130,39 +130,37 @@ def report(result: dict[str, Any], saved: Path) -> None:
     print("waiting for CloudWatch Logs Insights...", flush=True)
     # where the Lambda client invoked: boto3 reads only AWS_DEFAULT_REGION
     logs = boto3.client("logs", region_name=os.environ.get("AWS_REGION"))
-    # the coordinators' REPORT lines fall in their workers' windows too
+    # the dispatchers' REPORT lines fall in their workers' windows too
     windows = query_windows(result["invocations"])
     workers = join(
         result["invocations"],
         query_all_reports(logs, FUNCTION, {r["req_id"] for r in result["invocations"]}, windows),
     )
-    coordinators = join(
-        result["coordinators"],
-        query_all_reports(
-            logs, COORDINATOR, {c["req_id"] for c in result["coordinators"]}, windows
-        ),
+    dispatchers = join(
+        result["dispatchers"],
+        query_all_reports(logs, DISPATCHER, {c["req_id"] for c in result["dispatchers"]}, windows),
     )
     cold = sum(w["init_ms"] is not None for w in workers)
     print(
         f"{len(workers):,} of {len(result['invocations']):,} workers, {cold:,} cold; "
-        f"{len(coordinators)} of {len(result['coordinators'])} coordinators"
+        f"{len(dispatchers)} of {len(result['dispatchers'])} dispatchers"
         + (
             " (the rest are missing from the cost)"
-            if len(workers) + len(coordinators)
-            < len(result["invocations"]) + len(result["coordinators"])
+            if len(workers) + len(dispatchers)
+            < len(result["invocations"]) + len(result["dispatchers"])
             else ""
         )
     )
     print(describe("handler", [w["duration_ms"] for w in workers]))
     # past its own elapsed_ms, it is still streaming results to the client
-    print(describe("coord", [c["duration_ms"] for c in coordinators]))
+    print(describe("dispatch", [c["duration_ms"] for c in dispatchers]))
     if workers:
         print(
             f"   memory: max {max(w['max_memory_mb'] for w in workers):.0f} MB "
             f"of {max(w['memory_size_mb'] for w in workers):.0f} MB"
         )
-    # coordinators make no S3 requests
-    spend = cost.actual(workers + [{**c, "s3_gets": 0, "s3_lists": 0} for c in coordinators])
+    # dispatchers make no S3 requests
+    spend = cost.actual(workers + [{**c, "s3_gets": 0, "s3_lists": 0} for c in dispatchers])
     print(cost.summarize_actual(spend) if spend else "no REPORT lines found, so no cost")
     ran = {w["req_id"]: w for w in workers}
     draw(
