@@ -29,11 +29,11 @@ def describe(name: str, values: list[float]) -> str:
 
 def run(query: str, tables: dict[str, sql.Table], **settings: Any) -> dict[str, Any]:
     """
-    Run `query` as `sql.run` does, with one fan-out: its rows, and what each
-    invocation, worker and dispatcher did.
+    Run `query` as `sql.run` does, with one fan-out and a progress bar: its
+    rows, and what each invocation, worker and dispatcher did.
     """
     started = time.monotonic()
-    result = sql.run(query, tables, return_stats=True, **settings)
+    result = sql.run(query, tables, progress=True, return_stats=True, **settings)
     wall = time.monotonic() - started
     [report] = result.reports
     workers = {w["index"]: w for w in report["workers"]}

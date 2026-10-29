@@ -36,6 +36,7 @@ impl Session {
         allow_cross_region = false,
         return_stats = false,
         target_partitions = None,
+        on_progress = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -49,6 +50,7 @@ impl Session {
         allow_cross_region: bool,
         return_stats: bool,
         target_partitions: Option<usize>,
+        on_progress: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         let tables = tables
             .into_iter()
@@ -67,7 +69,17 @@ impl Session {
         };
         let ctx = py.detach(|| {
             runtime.block_on(async {
-                let fan_out = Arc::new(FanOut::connect(settings).await);
+                let mut fan_out = FanOut::connect(settings).await;
+                if let Some(callback) = on_progress {
+                    fan_out = fan_out.with_progress(Arc::new(move |done, total| {
+                        Python::attach(|py| {
+                            if let Err(e) = callback.call1(py, (done, total)) {
+                                e.write_unraisable(py, None);
+                            }
+                        })
+                    }));
+                }
+                let fan_out = Arc::new(fan_out);
                 let ctx = fanout::session(fan_out, target_partitions);
                 fanout::register(&ctx, &tables).await.map(|_| ctx)
             })

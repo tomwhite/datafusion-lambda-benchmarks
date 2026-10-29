@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 import pyarrow as pa
+from tqdm import tqdm
 
 from datafusion_lambda_benchmarks._native import Session
 
@@ -40,7 +41,9 @@ def session(tables: dict[str, Table], **settings: Any) -> Session:
     `chunks_per_invocation`, `chunks_in_flight` (how many of those a
     worker runs at once, by default 2), `allow_cross_region` (else a fan-out
     over an S3 bucket in another region than the workers is refused before
-    it starts), `return_stats` and `target_partitions`.
+    it starts), `return_stats`, `target_partitions` and `on_progress`, called
+    with how many of a fan-out's invocations have succeeded and how many it
+    has: with none before it invokes, then as they arrive.
     """
     return Session({name: _table(table) for name, table in tables.items()}, **settings)
 
@@ -69,7 +72,41 @@ def explain(query: str, tables: dict[str, Table], **settings: Any) -> str:
     return "\n".join([plan, *(f"fragment:\n{f}" for f in s.explain_fragments(query))])
 
 
-def run(query: str, tables: dict[str, Table], **settings: Any) -> Result:
-    """Run `query` over `tables`, with `session`'s settings."""
-    stream, reports = session(tables, **settings).sql(query)
+class _Progress:
+    """A bar for each fan-out in turn, of its invocations that have succeeded."""
+
+    def __init__(self) -> None:
+        self.bar: tqdm | None = None
+
+    def __call__(self, done: int, total: int) -> None:
+        if done == 0:
+            self.close()
+            # no ETA: invocations finish in waves, so the rate swings
+            self.bar = tqdm(
+                total=total,
+                bar_format="{n_fmt}/{total_fmt} invocations |{bar}| {elapsed}",
+                disable=None,
+            )
+        elif self.bar is not None:
+            self.bar.update(done - self.bar.n)
+
+    def close(self) -> None:
+        if self.bar is not None:
+            self.bar.close()
+            self.bar = None
+
+
+def run(query: str, tables: dict[str, Table], progress: bool = False, **settings: Any) -> Result:
+    """
+    Run `query` over `tables`, with `session`'s settings, and with `progress`
+    a bar on stderr for each fan-out, when it is a terminal.
+    """
+    bar = _Progress() if progress else None
+    if bar is not None:
+        settings["on_progress"] = bar
+    try:
+        stream, reports = session(tables, **settings).sql(query)
+    finally:
+        if bar is not None:
+            bar.close()
     return Result(pa.ipc.open_stream(stream).read_all(), json.loads(reports))

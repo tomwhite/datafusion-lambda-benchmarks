@@ -170,6 +170,30 @@ def test_every_invocation_has_its_workers_measurements(era5):
 
 
 @pytest.mark.lambda_integration
+def test_progress_counts_up_to_every_invocation(era5):
+    calls = []
+    result = run(
+        QUERIES[0],
+        {"era5": era5},
+        **LOCAL,
+        chunks_per_invocation=7,
+        on_progress=lambda done, total: calls.append((done, total)),
+    )
+
+    total = result.invocations
+    assert calls[0] == (0, total)
+    assert calls[-1] == (total, total)
+    assert [done for done, _ in calls] == sorted(done for done, _ in calls)
+
+
+@pytest.mark.lambda_integration
+def test_a_progress_bar_gives_the_same_answer(era5):
+    result = run(QUERIES[0], {"era5": era5}, **LOCAL, progress=True)
+
+    rows_close(result.table.to_pylist(), query_locally(era5, QUERIES[0]))
+
+
+@pytest.mark.lambda_integration
 def test_dispatchers_share_the_invocations_with_the_same_answer(era5):
     result = run(QUERIES[0], {"era5": era5}, **LOCAL, dispatchers=3, return_stats=True)
 

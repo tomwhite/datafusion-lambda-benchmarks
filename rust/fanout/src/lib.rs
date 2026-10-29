@@ -92,10 +92,15 @@ impl Default for Settings {
     }
 }
 
+/// Called with how many of a fan-out's invocations have succeeded, and how
+/// many it has: with none before it invokes, then as they arrive.
+pub type OnProgress = Arc<dyn Fn(usize, usize) + Send + Sync>;
+
 /// A map-lambda session and the settings its fan-outs run with.
 pub struct FanOut {
     lambdas: Lambdas,
     settings: Settings,
+    on_progress: Option<OnProgress>,
 }
 
 impl fmt::Debug for FanOut {
@@ -115,7 +120,16 @@ impl FanOut {
         calls.retries = settings.retries;
         calls.return_stats = settings.return_stats;
         let lambdas = Lambdas::new(transport, settings.endpoint_url.clone()).with_settings(calls);
-        Self { lambdas, settings }
+        Self {
+            lambdas,
+            settings,
+            on_progress: None,
+        }
+    }
+
+    pub fn with_progress(mut self, on_progress: OnProgress) -> Self {
+        self.on_progress = Some(on_progress);
+        self
     }
 
     /// Against real Lambda, or the emulator at `settings.endpoint_url`.
@@ -752,6 +766,8 @@ impl ExecutionPlan for MapLambdaZarrExec {
                 .collect()
         };
         let (fan_out, template) = (self.fan_out.clone(), self.template());
+        let on_progress = self.fan_out.on_progress.clone();
+        let total = inputs.len();
         // The workers each write their own chunks to a store made here first.
         let store = self
             .plan
@@ -766,6 +782,9 @@ impl ExecutionPlan for MapLambdaZarrExec {
                     .map_err(external)?
                     .map_err(DataFusionError::External)?;
             }
+            if let Some(on_progress) = &on_progress {
+                on_progress(0, total);
+            }
             let worker = &fan_out.settings.worker_function;
             Ok::<_, DataFusionError>(
                 fan_out
@@ -778,9 +797,15 @@ impl ExecutionPlan for MapLambdaZarrExec {
         .try_flatten();
         let report = self.report.clone();
         let return_stats = self.fan_out.settings.return_stats;
+        let on_progress = self.fan_out.on_progress.clone();
+        let mut done = 0;
         let started = Instant::now();
         let batches = run
             .and_then(move |batch| {
+                if let (Some(on_progress), 1..) = (&on_progress, batch.done) {
+                    done += batch.done;
+                    on_progress(done, total);
+                }
                 let decoded = batch
                     .answers
                     .iter()
