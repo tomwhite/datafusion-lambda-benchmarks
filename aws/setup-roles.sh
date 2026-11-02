@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Once, before deploy.sh. Wait a few seconds afterwards for IAM to apply.
+# Once, before deploy.sh. Wait a few seconds afterwards for IAM to apply. With
+# OUTPUT_BUCKET set, the workers may also write there, for COPY … TO S3.
 set -euo pipefail
 
 export AWS_PAGER=""
@@ -32,3 +33,18 @@ aws iam put-role-policy --role-name $DISPATCHER_ROLE \
   }]
 }'
 
+if [ -n "${OUTPUT_BUCKET:-}" ]; then
+  aws iam put-role-policy --role-name $WORKER_ROLE \
+    --policy-name write-output --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:AbortMultipartUpload", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::'"$OUTPUT_BUCKET"'/*"
+    }, {
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::'"$OUTPUT_BUCKET"'"
+    }]
+  }'
+fi

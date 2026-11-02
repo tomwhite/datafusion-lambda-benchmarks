@@ -12,11 +12,19 @@ use crate::bounded::BoundedCoalesceExec;
 
 /// `plan`'s partitions as one, run `in_flight` at a time. A partial aggregate's
 /// are merged under a `PartialReduce`, which keeps its schema: one partial row
-/// per group.
+/// per group. Under a final aggregate, or nodes of one input over one, its
+/// input's are.
 pub fn merge_partials(
     plan: Arc<dyn ExecutionPlan>,
     in_flight: usize,
 ) -> Result<Arc<dyn ExecutionPlan>> {
+    let mode = plan.downcast_ref::<AggregateExec>().map(|a| *a.mode());
+    if let (None | Some(AggregateMode::Final), [input]) = (mode, &plan.children()[..]) {
+        if mode.is_some() || ends_in_an_aggregate(input) {
+            let input = merge_partials((*input).clone(), in_flight)?;
+            return plan.clone().with_new_children(vec![input]);
+        }
+    }
     if plan.output_partitioning().partition_count() < 2 {
         return Ok(plan);
     }
@@ -41,6 +49,11 @@ pub fn merge_partials(
     } else {
         coalesced
     })
+}
+
+fn ends_in_an_aggregate(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.is::<AggregateExec>()
+        || matches!(&plan.children()[..], [input] if ends_in_an_aggregate(input))
 }
 
 #[cfg(test)]
@@ -155,6 +168,53 @@ mod tests {
 
         assert_eq!(rows, 1);
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn a_final_aggregate_finishes_the_merged_partials() {
+        let ctx = context().await;
+        let query = "SELECT k, sum(v) AS s, avg(v) AS a FROM t GROUP BY k";
+        let plan = ctx
+            .sql(query)
+            .await
+            .unwrap()
+            .create_physical_plan()
+            .await
+            .unwrap();
+        let expected = collect(plan.clone(), ctx.task_ctx()).await.unwrap();
+        let partial = partial_aggregate(&plan).unwrap();
+        let source = partial.downcast_ref::<AggregateExec>().unwrap();
+        let finish = Arc::new(
+            AggregateExec::try_new(
+                AggregateMode::Final,
+                source.group_expr().as_final(),
+                source.aggr_expr().to_vec(),
+                source.filter_expr().to_vec(),
+                partial.clone(),
+                source.input_schema(),
+            )
+            .unwrap(),
+        );
+
+        let merged = merge_partials(finish, 2).unwrap();
+
+        assert!(merged.children()[0]
+            .downcast_ref::<AggregateExec>()
+            .is_some_and(|a| *a.mode() == AggregateMode::PartialReduce));
+        let rows = |batches: &[RecordBatch]| {
+            let mut lines: Vec<_> = arrow::util::pretty::pretty_format_batches(batches)
+                .unwrap()
+                .to_string()
+                .lines()
+                .skip(3)
+                .filter(|line| !line.starts_with('+'))
+                .map(|line| line.split('|').map(str::trim).collect::<Vec<_>>().join("|"))
+                .collect();
+            lines.sort();
+            lines
+        };
+        let actual = collect(merged, ctx.task_ctx()).await.unwrap();
+        assert_eq!(rows(&actual), rows(&expected));
     }
 
     #[tokio::test]
