@@ -41,7 +41,7 @@ use datafusion::physical_plan::{
 use datafusion::prelude::SessionContext;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
-use map_lambda_client::{Lambda, Lambdas, Transport};
+use map_lambda_client::{connect, Invoker, Session};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use split::PartitionSpec;
@@ -98,7 +98,7 @@ pub type OnProgress = Arc<dyn Fn(usize, usize) + Send + Sync>;
 
 /// A map-lambda session and the settings its fan-outs run with.
 pub struct FanOut {
-    lambdas: Lambdas,
+    session: Session,
     settings: Settings,
     on_progress: Option<OnProgress>,
 }
@@ -112,16 +112,16 @@ impl fmt::Debug for FanOut {
 }
 
 impl FanOut {
-    pub fn new(transport: Arc<dyn Transport>, settings: Settings) -> Self {
+    pub fn new(invoker: Arc<dyn Invoker>, settings: Settings) -> Self {
         let mut calls = map_lambda_client::Settings::default();
         calls.dispatcher_function = settings.dispatcher_function.clone();
         calls.dispatchers = settings.dispatchers;
         calls.concurrency = settings.concurrency;
         calls.retries = settings.retries;
         calls.return_stats = settings.return_stats;
-        let lambdas = Lambdas::new(transport, settings.endpoint_url.clone()).with_settings(calls);
+        let session = Session::new(invoker, settings.endpoint_url.clone()).with_settings(calls);
         Self {
-            lambdas,
+            session,
             settings,
             on_progress: None,
         }
@@ -134,8 +134,8 @@ impl FanOut {
 
     /// Against real Lambda, or the emulator at `settings.endpoint_url`.
     pub async fn connect(settings: Settings) -> Self {
-        let lambda = Lambda::connect(settings.endpoint_url.as_deref()).await;
-        Self::new(Arc::new(lambda), settings)
+        let invoker = connect(settings.endpoint_url.as_deref()).await;
+        Self::new(invoker, settings)
     }
 }
 
@@ -552,7 +552,7 @@ fn by_tile(
 pub struct Report {
     pub chunks: usize,
     pub invocations: usize,
-    /// From dispatching to the last answer.
+    /// From dispatching to the last output.
     pub elapsed_s: f64,
     /// With `return_stats`: each invocation's record, as map-lambda keeps it.
     pub invocation_stats: Vec<Value>,
@@ -788,7 +788,7 @@ impl ExecutionPlan for MapLambdaZarrExec {
             let worker = &fan_out.settings.worker_function;
             Ok::<_, DataFusionError>(
                 fan_out
-                    .lambdas
+                    .session
                     .map_unordered(worker, inputs, "partitions", template)
                     .map_err(external)?
                     .map_err(external),
@@ -798,50 +798,50 @@ impl ExecutionPlan for MapLambdaZarrExec {
         let report = self.report.clone();
         let return_stats = self.fan_out.settings.return_stats;
         let on_progress = self.fan_out.on_progress.clone();
-        let mut done = 0;
+        let mut succeeded = 0;
         let started = Instant::now();
         let batches = run
             .and_then(move |batch| {
-                if let (Some(on_progress), 1..) = (&on_progress, batch.done) {
-                    done += batch.done;
-                    on_progress(done, total);
+                if let (Some(on_progress), 1..) = (&on_progress, batch.succeeded) {
+                    succeeded += batch.succeeded;
+                    on_progress(succeeded, total);
                 }
                 let decoded = batch
-                    .answers
+                    .outputs
                     .iter()
-                    .map(|(index, answer)| {
-                        let answer: Value = serde_json::from_str(answer.get()).map_err(external)?;
-                        Ok((*index, answer))
+                    .map(|(index, output)| {
+                        let output: Value = serde_json::from_str(output.get()).map_err(external)?;
+                        Ok((*index, output))
                     })
                     .collect::<Result<Vec<_>>>()
-                    .and_then(|answers| {
+                    .and_then(|outputs| {
                         let mut report = report.lock().expect("unpoisoned");
                         report.elapsed_s = started.elapsed().as_secs_f64();
                         report
                             .dispatcher_stats
                             .extend(batch.dispatcher_stats.iter().map(to_value));
                         if return_stats {
-                            let bytes: usize = answers
+                            let bytes: usize = outputs
                                 .iter()
-                                .map(|(_, answer)| answer["batches"].as_str().map_or(0, str::len))
+                                .map(|(_, output)| output["batches"].as_str().map_or(0, str::len))
                                 .sum();
                             let at_s = report.elapsed_s;
                             report.arrivals.push(json!({"at_s": at_s, "bytes": bytes}));
                             report
                                 .invocation_stats
                                 .extend(batch.invocation_stats.iter().map(to_value));
-                            report.workers.extend(answers.iter().map(|(index, answer)| {
+                            report.workers.extend(outputs.iter().map(|(index, output)| {
                                 json!({
                                     "index": index,
-                                    "timings_ms": answer["timings_ms"],
-                                    "s3_requests": answer["s3_requests"],
-                                    "chunks_in_flight": answer["chunks_in_flight"],
+                                    "timings_ms": output["timings_ms"],
+                                    "s3_requests": output["s3_requests"],
+                                    "chunks_in_flight": output["chunks_in_flight"],
                                 })
                             }));
                         }
-                        answers
+                        outputs
                             .iter()
-                            .map(|(_, answer)| decode(answer))
+                            .map(|(_, output)| decode(output))
                             .collect::<Result<Vec<_>>>()
                     })
                     .map(|batches| futures::stream::iter(batches.into_iter().flatten().map(Ok)));

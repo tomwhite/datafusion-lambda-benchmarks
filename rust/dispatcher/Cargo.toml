@@ -13,5 +13,5 @@ timeout = 900
 
 [dependencies]
 lambda_runtime = "1.0.1"
-map-lambda-dispatcher = { git = "https://github.com/tomwhite/map-lambda", rev = "b31474f" }
+map-lambda-dispatcher = { git = "https://github.com/tomwhite/map-lambda", rev = "37924bc" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
