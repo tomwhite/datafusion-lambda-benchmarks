@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-map-lambda = { git = "https://github.com/tomwhite/map-lambda", rev = "37924bc" }
+map-lambda = { git = "https://github.com/tomwhite/map-lambda", rev = "1683456" }
 
 [build-system]
 requires = ["maturin>=1.9,<2"]
