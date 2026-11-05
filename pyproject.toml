@@ -18,7 +18,7 @@ dependencies = [
 datafusion-lambda-benchmarks = "datafusion_lambda_benchmarks.cli:cli"
 
 [tool.uv.sources]
-map-lambda = { git = "file:///Users/tom/workspace/map-lambda", rev = "a261b9f" }
+map-lambda = { git = "https://github.com/tomwhite/map-lambda", rev = "bb0893a" }
 
 [build-system]
 requires = ["maturin>=1.9,<2"]

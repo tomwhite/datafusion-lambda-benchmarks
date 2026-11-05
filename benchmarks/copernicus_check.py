@@ -4,10 +4,10 @@ global mean 2 m temperature from ERA5, each day the mean of its hourly values,
 averaged over the days of each month in the run's window. It charts both,
 and their difference below, beside the run, as `results/demo-....-copernicus.svg`:
 
+\b
     uv run python benchmarks/copernicus_check.py results/demo-....json
 """
 
-import argparse
 import csv
 import io
 import json
@@ -15,6 +15,8 @@ import urllib.request
 from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
+
+import click
 
 DAILY = "https://sites.ecmwf.int/data/climatepulse/data/series/era5_daily_series_2t_global.csv"
 
@@ -63,17 +65,16 @@ def chart(months: list[datetime], ours: list[float], copernicus: list[float], pa
         ax.grid(True, alpha=0.3)
     fig.tight_layout()
     fig.savefig(path)
-    print(f"chart in {path}")
+    click.echo(f"chart in {path}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("results", type=Path, help="a saved demo.py run")
-    args = parser.parse_args()
-    run = json.loads(args.results.read_text())
+@click.command(help=__doc__)
+@click.argument("results", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def main(results: Path) -> None:
+    run = json.loads(results.read_text())
     start, end = (datetime.fromisoformat(run[k]) for k in ("start", "end"))
     if any(t != datetime.combine(t.date(), datetime.min.time()) for t in (start, end)):
-        raise SystemExit("Climate Pulse is daily, so the run's window must be whole days")
+        raise click.ClickException("Climate Pulse is daily, so the run's window must be whole days")
 
     by_month = defaultdict(list)
     for day, mean in daily_means().items():
@@ -87,23 +88,23 @@ def main() -> None:
         month = row["month"][:7]
         days = by_month[month]
         if not days:
-            raise SystemExit(f"Climate Pulse has no days for {month}")
+            raise click.ClickException(f"Climate Pulse has no days for {month}")
         expected = sum(days) / len(days)
         actual = row["mean_t2m"] - 273.15
         months.append(datetime.fromisoformat(row["month"]))
         ours.append(actual)
         copernicus.append(expected)
-        print(f"{month}  Copernicus {expected:7.3f}  map-lambda {actual:8.4f} °C")
-    chart(months, ours, copernicus, args.results.with_name(f"{args.results.stem}-copernicus.svg"))
+        click.echo(f"{month}  Copernicus {expected:7.3f}  map-lambda {actual:8.4f} °C")
+    chart(months, ours, copernicus, results.with_name(f"{results.stem}-copernicus.svg"))
     differences = [a - e for a, e in zip(ours, copernicus, strict=True)]
-    print(f"{len(months)} months, max difference {max(map(abs, differences)):.4f} °C")
+    click.echo(f"{len(months)} months, max difference {max(map(abs, differences)):.4f} °C")
     over = [(m, d) for m, d in zip(months, differences, strict=True) if abs(d) >= TOLERANCE_C]
     if not over:
-        print("all as expected")
+        click.secho("all as expected", fg="green")
         return
-    print(f"over the {TOLERANCE_C} °C tolerance:")
+    click.secho(f"over the {TOLERANCE_C} °C tolerance:", fg="red")
     for month, difference in over:
-        print(f"  {month:%Y-%m}  {difference:+.4f} °C")
+        click.secho(f"  {month:%Y-%m}  {difference:+.4f} °C", fg="red")
     raise SystemExit(1)
 
 

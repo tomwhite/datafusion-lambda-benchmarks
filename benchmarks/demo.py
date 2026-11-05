@@ -3,6 +3,7 @@ The demo: the monthly area-weighted global mean of `t2m` over Earthmover's
 ERA5, an Icechunk repo in us-east-1, fanned out from a window's hourly
 chunks. The workers must be in the bucket's region, as the deploy spec fixes:
 
+\b
     uv run datafusion-lambda-benchmarks deploy --from-source
     eval "$(aws configure export-credentials --format env)"; export AWS_REGION=us-east-1
     uv run python benchmarks/demo.py --start 2020-01-01 --end 2020-04-01
@@ -13,7 +14,6 @@ values against xarray, and `copernicus_check.py` every month's mean against
 Copernicus's published daily means. **This invokes real Lambdas and is billed.**
 """
 
-import argparse
 import asyncio
 import calendar
 import json
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import click
 import icechunk
 import numpy as np
 from map_lambda import LOCAL_ENDPOINT_URL
@@ -109,76 +110,93 @@ def check(rows: list[dict[str, Any]], start: datetime, end: datetime, cells: int
     return problems
 
 
-def settings(args: argparse.Namespace) -> dict[str, Any]:
-    return {
-        "endpoint_url": LOCAL_ENDPOINT_URL if args.local else None,
-        "concurrency": args.concurrency,
-        "dispatchers": args.dispatchers,
-        "chunks_per_invocation": args.chunks_per_invocation,
-        "chunks_in_flight": args.chunks_in_flight,
-        "allow_cross_region": args.allow_cross_region,
-    }
-
-
 def print_problems(rows: list[dict[str, Any]], problems: list[str]) -> None:
-    print(f"{len(rows)} rows: " + ("all as expected" if not problems else "PROBLEMS"))
+    verdict = (
+        click.style("PROBLEMS", fg="red")
+        if problems
+        else click.style("all as expected", fg="green")
+    )
+    click.echo(f"{len(rows)} rows: {verdict}")
     for problem in problems[:20]:
-        print(f"  {problem}")
+        click.secho(f"  {problem}", fg="red")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default=URL, help="the Icechunk repo")
-    parser.add_argument("--start", type=datetime.fromisoformat, default=datetime(2020, 1, 1))
-    parser.add_argument("--end", type=datetime.fromisoformat, default=datetime(2020, 4, 1))
-    parser.add_argument("--concurrency", type=int, default=1000)
-    parser.add_argument("--dispatchers", type=int)
-    parser.add_argument("--chunks-per-invocation", type=int, default=24)
-    parser.add_argument("--chunks-in-flight", type=int)
-    parser.add_argument(
-        "--local", action="store_true", help=f"against {LOCAL_ENDPOINT_URL}, with no CloudWatch"
-    )
-    parser.add_argument(
-        "--allow-cross-region",
-        action="store_true",
-        help="read a bucket in another region than the workers, billed per GB",
-    )
-    parser.add_argument(
-        "--explain", action="store_true", help="print the plan and the workers' fragment, and stop"
-    )
-    parser.add_argument(
-        "--report",
-        type=Path,
-        metavar="RESULTS",
-        help="report on a run saved in RESULTS from CloudWatch, without running it again",
-    )
-    parser.set_defaults(query="demo")
-    args = parser.parse_args()
-    if args.report:
-        runs.report(json.loads(args.report.read_text()), args.report)
+@click.command(help=__doc__)
+@click.option("--url", default=URL, show_default=True, help="The Icechunk repo.")
+@click.option(
+    "--start",
+    type=click.DateTime(),
+    metavar="DATE",
+    default=datetime(2020, 1, 1),
+    show_default=True,
+)
+@click.option(
+    "--end", type=click.DateTime(), metavar="DATE", default=datetime(2020, 4, 1), show_default=True
+)
+@click.option("--concurrency", default=1000, show_default=True)
+@click.option("--dispatchers", type=int)
+@click.option("--chunks-per-invocation", default=24, show_default=True)
+@click.option("--chunks-in-flight", type=int)
+@click.option("--local", is_flag=True, help=f"Against {LOCAL_ENDPOINT_URL}, with no CloudWatch.")
+@click.option(
+    "--allow-cross-region",
+    is_flag=True,
+    help="Read a bucket in another region than the workers, billed per GB.",
+)
+@click.option("--explain", is_flag=True, help="Print the plan and the workers' fragment, and stop.")
+@click.option(
+    "--report",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    metavar="RESULTS",
+    help="Report on a run saved in RESULTS from CloudWatch, without running it again.",
+)
+def main(
+    url: str,
+    start: datetime,
+    end: datetime,
+    concurrency: int,
+    dispatchers: int | None,
+    chunks_per_invocation: int,
+    chunks_in_flight: int | None,
+    local: bool,
+    allow_cross_region: bool,
+    explain: bool,
+    report: Path | None,
+) -> None:
+    if report:
+        runs.report(json.loads(report.read_text()), report)
         return
 
-    meta = metadata(args.url)
+    meta = metadata(url)
     chunk_shape = meta["chunk_grid"]["configuration"]["chunk_shape"]
     chunk_bytes = math.prod(chunk_shape) * np.dtype(meta["data_type"]).itemsize
     cells = math.prod(meta["shape"][1:])
-    tables: dict[str, sql.Table] = {"era5": {"url": args.url, "group": GROUP}}
-    query = QUERY.format(**bounds(args.start, args.end))
-    if args.explain:
-        print(sql.explain(query, tables, **settings(args)))
+    tables: dict[str, sql.Table] = {"era5": {"url": url, "group": GROUP}}
+    query = QUERY.format(**bounds(start, end))
+    settings: dict[str, Any] = {
+        "endpoint_url": LOCAL_ENDPOINT_URL if local else None,
+        "concurrency": concurrency,
+        "dispatchers": dispatchers,
+        "chunks_per_invocation": chunks_per_invocation,
+        "chunks_in_flight": chunks_in_flight,
+        "allow_cross_region": allow_cross_region,
+    }
+    if explain:
+        click.echo(sql.explain(query, tables, **settings))
         return
-    result = {**vars(args), **runs.run(query, tables, **settings(args))}
+    options = click.get_current_context().params
+    result = {"query": "demo", **options, **runs.run(query, tables, **settings)}
 
-    hours = (args.end - args.start) / timedelta(hours=1)
-    runs.print_run(result, args.concurrency, math.ceil(hours / chunk_shape[0]), chunk_bytes)
+    hours = (end - start) / timedelta(hours=1)
+    runs.print_run(result, concurrency, math.ceil(hours / chunk_shape[0]), chunk_bytes)
     for row in result["rows"]:
-        print(
+        click.echo(
             f"  {row['month']:%Y-%m}  mean {row['mean_t2m']:.4f} K  "
             f"min {row['min_t2m']:.2f}  max {row['max_t2m']:.2f}  n {row['n']:,}"
         )
-    print_problems(result["rows"], check(result["rows"], args.start, args.end, cells))
+    print_problems(result["rows"], check(result["rows"], start, end, cells))
     saved = runs.save(RESULTS, "demo", result)
-    if not args.local:
+    if not local:
         runs.report(result, saved)
 
 

@@ -3,8 +3,9 @@ The climatology over one tile of Earthmover's ERA5 pencils, `single/temporal`,
 through the fan-out, against xarray's `groupby("valid_time.hour").mean()` in
 one process:
 
+\b
     export AWS_SKIP_SIGNATURE=true AWS_REGION=us-east-1
-    uv run --with xarray --with "numcodecs[pcodec]" --with obstore \
+    uv run --with xarray --with "numcodecs[pcodec]" --with obstore \\
         python benchmarks/climatology_check.py --local
 
 With `--local` the workers are a `cargo lambda watch` here, reading a pencil
@@ -14,11 +15,11 @@ tile's chunk of a `climatology.py` output instead, over the same window. A
 tile is 12 by 12 cells, numbered from the north pole and the prime meridian.
 """
 
-import argparse
 import time
 from datetime import datetime
 from urllib.parse import urlparse
 
+import click
 import icechunk
 import numpy as np
 import xarray as xr
@@ -108,27 +109,33 @@ def by_xarray(box: dict[str, float], start: datetime, end: datetime) -> dict:
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--row", type=int, default=10, help="the tile's row, from the north")
-    parser.add_argument("--column", type=int, default=0, help="the tile's column, from 0°E")
-    parser.add_argument("--start", type=datetime.fromisoformat, default=datetime(2020, 2, 1))
-    parser.add_argument("--end", type=datetime.fromisoformat, default=datetime(2020, 3, 1))
-    parser.add_argument("--local", action="store_true", help=f"against {LOCAL_ENDPOINT_URL}")
-    parser.add_argument("--output", help="a climatology.py output to check, run over the window")
-    args = parser.parse_args()
-
-    box = bounds(args.row, args.column)
-    query = QUERY.format(
-        start=f"{args.start:%Y-%m-%d %H:%M:%S}", end=f"{args.end:%Y-%m-%d %H:%M:%S}", **box
-    )
+@click.command(help=__doc__)
+@click.option("--row", default=10, show_default=True, help="The tile's row, from the north.")
+@click.option("--column", default=0, show_default=True, help="The tile's column, from 0°E.")
+@click.option(
+    "--start",
+    type=click.DateTime(),
+    metavar="DATE",
+    default=datetime(2020, 2, 1),
+    show_default=True,
+)
+@click.option(
+    "--end", type=click.DateTime(), metavar="DATE", default=datetime(2020, 3, 1), show_default=True
+)
+@click.option("--local", is_flag=True, help=f"Against {LOCAL_ENDPOINT_URL}.")
+@click.option("--output", help="A climatology.py output to check, run over the window.")
+def main(
+    row: int, column: int, start: datetime, end: datetime, local: bool, output: str | None
+) -> None:
+    box = bounds(row, column)
+    query = QUERY.format(start=f"{start:%Y-%m-%d %H:%M:%S}", end=f"{end:%Y-%m-%d %H:%M:%S}", **box)
     started = time.monotonic()
-    if args.output:
-        rows = from_zarr(args.output, args.row, args.column)
-        source = args.output
+    if output:
+        rows = from_zarr(output, row, column)
+        source = output
     else:
         tables = {"era5": {"url": f"s3://{BUCKET}/{PREFIX}", "group": GROUP}}
-        endpoint_url = LOCAL_ENDPOINT_URL if args.local else None
+        endpoint_url = LOCAL_ENDPOINT_URL if local else None
         result = run(query, tables, endpoint_url=endpoint_url, concurrency=100)
         rows = {
             (r["latitude"], r["longitude"], r["hour"]): (r["clim"], r["n"])
@@ -136,20 +143,23 @@ def main() -> None:
         }
         source = f"{result.invocations} invocation(s)"
     read = time.monotonic()
-    expected = by_xarray(box, args.start, args.end)
+    expected = by_xarray(box, start, end)
     computed = time.monotonic()
 
-    print(
+    click.echo(
         f"{box['north']}°N to {box['south']}°N, {box['west']}°E to {box['east']}°E, "
-        f"{args.start:%Y-%m-%d} to {args.end:%Y-%m-%d}: {len(rows)} cell-hours"
+        f"{start:%Y-%m-%d} to {end:%Y-%m-%d}: {len(rows)} cell-hours"
     )
-    assert rows.keys() == expected.keys(), "different cell-hours"
+    if rows.keys() != expected.keys():
+        raise click.ClickException("the cell-hours differ from xarray's")
     worst = max(abs(rows[k][0] - expected[k][0]) for k in rows)
-    print(f"  largest difference from xarray {worst:.2e} K, from {source}")
-    print(f"  {read - started:.1f}s reading, {computed - read:.1f}s in xarray")
-    assert all(rows[k][1] == expected[k][1] for k in rows), "counts differ"
-    assert worst < TOLERANCE_K, f"means differ by {worst:.2e} K"
-    print("all as expected")
+    click.echo(f"  largest difference from xarray {worst:.2e} K, from {source}")
+    click.echo(f"  {read - started:.1f}s reading, {computed - read:.1f}s in xarray")
+    if any(rows[k][1] != expected[k][1] for k in rows):
+        raise click.ClickException("the counts differ from xarray's")
+    if worst >= TOLERANCE_K:
+        raise click.ClickException(f"the means differ from xarray's by up to {worst:.2e} K")
+    click.secho("all as expected", fg="green")
 
 
 if __name__ == "__main__":

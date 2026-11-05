@@ -56,9 +56,8 @@ cd rust && cargo test
 The lambdas are deployed as the map-lambda project `datafusion-lambda`,
 described by `datafusion_lambda_benchmarks/deploy.toml`: one CloudFormation
 stack holding `datafusion-lambda-dispatcher`, `datafusion-lambda-fragment`,
-their roles and their logs. See map-lambda's README for how a project is
-deployed. Building needs Rust, [Zig](https://ziglang.org/) and
-[cargo lambda](https://www.cargo-lambda.info/).
+their roles and their logs. Building needs Rust, [Zig](https://ziglang.org/)
+and [cargo lambda](https://www.cargo-lambda.info/).
 
 The data is in us-east-1, so the workers must be there too (a query refuses
 to run otherwise), which the spec fixes. ERA5 is read anonymously, so a

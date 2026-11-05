@@ -4,6 +4,7 @@ The hourly climatology of `t2m` over Earthmover's ERA5 pencils,
 The workers must be in the bucket's region, as the deploy spec fixes, and
 allowed to write to the output's:
 
+\b
     uv run datafusion-lambda-benchmarks deploy --from-source --allow-bucket ...
     eval "$(aws configure export-credentials --format env)"; export AWS_REGION=us-east-1
     uv run python benchmarks/climatology.py s3://.../climatology.zarr
@@ -16,7 +17,6 @@ so that its rows are final and its own to write.
 **This invokes real Lambdas and is billed.**
 """
 
-import argparse
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import boto3
+import click
 from map_lambda import LOCAL_ENDPOINT_URL
 
 from datafusion_lambda_benchmarks import runs, sql
@@ -75,59 +76,74 @@ def objects(output: str) -> int:
     return sum(page.get("KeyCount", 0) for page in pages)
 
 
-def settings(args: argparse.Namespace) -> dict[str, Any]:
-    return {
-        "endpoint_url": LOCAL_ENDPOINT_URL if args.local else None,
-        "concurrency": args.concurrency,
-        "dispatchers": args.dispatchers,
-        "chunks_per_invocation": args.chunks_per_invocation,
-        "chunks_in_flight": args.chunks_in_flight,
-    }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("output", help="a new Zarr store, local or s3://")
-    parser.add_argument("--start", type=datetime.fromisoformat, default=datetime(2020, 1, 6))
-    parser.add_argument("--end", type=datetime.fromisoformat, default=datetime(2020, 1, 13))
-    parser.add_argument("--concurrency", type=int, default=990)
-    parser.add_argument("--dispatchers", type=int)
-    parser.add_argument("--chunks-in-flight", type=int)
-    parser.add_argument(
-        "--local", action="store_true", help=f"against {LOCAL_ENDPOINT_URL}, with no CloudWatch"
-    )
-    parser.add_argument(
-        "--explain", action="store_true", help="print the plan and the workers' fragment, and stop"
-    )
-    parser.set_defaults(query="climatology")
-    args = parser.parse_args()
-    args.chunks_per_invocation = bands(args.start, args.end)
-
+@click.command(help=__doc__)
+@click.argument("output")
+@click.option(
+    "--start",
+    type=click.DateTime(),
+    metavar="DATE",
+    default=datetime(2020, 1, 6),
+    show_default=True,
+)
+@click.option(
+    "--end", type=click.DateTime(), metavar="DATE", default=datetime(2020, 1, 13), show_default=True
+)
+@click.option("--concurrency", default=990, show_default=True)
+@click.option("--dispatchers", type=int)
+@click.option("--chunks-in-flight", type=int)
+@click.option("--local", is_flag=True, help=f"Against {LOCAL_ENDPOINT_URL}, with no CloudWatch.")
+@click.option("--explain", is_flag=True, help="Print the plan and the workers' fragment, and stop.")
+def main(
+    output: str,
+    start: datetime,
+    end: datetime,
+    concurrency: int,
+    dispatchers: int | None,
+    chunks_in_flight: int | None,
+    local: bool,
+    explain: bool,
+) -> None:
+    chunks_per_invocation = bands(start, end)
     tables: dict[str, sql.Table] = {"era5": {"url": URL, "group": GROUP}}
     query = QUERY.format(
-        start=f"{args.start:%Y-%m-%d %H:%M:%S}",
-        end=f"{args.end:%Y-%m-%d %H:%M:%S}",
-        output=args.output,
+        start=f"{start:%Y-%m-%d %H:%M:%S}",
+        end=f"{end:%Y-%m-%d %H:%M:%S}",
+        output=output,
         chunks=ZARR_CHUNKS,
     )
-    if args.explain:
-        print(sql.explain(query, tables, **settings(args)))
+    settings: dict[str, Any] = {
+        "endpoint_url": LOCAL_ENDPOINT_URL if local else None,
+        "concurrency": concurrency,
+        "dispatchers": dispatchers,
+        "chunks_per_invocation": chunks_per_invocation,
+        "chunks_in_flight": chunks_in_flight,
+    }
+    if explain:
+        click.echo(sql.explain(query, tables, **settings))
         return
-    chunks = f"{args.output.rstrip('/')}/clim/c/"
+    chunks = f"{output.rstrip('/')}/clim/c/"
     if objects(chunks):
         # its chunks would be rewritten in place, and not counted
-        parser.error(f"{args.output} already has chunks: write to a new store")
-    result = {**vars(args), **runs.run(query, tables, **settings(args))}
+        raise click.BadParameter(
+            f"{output} already has chunks: write to a new store", param_hint="OUTPUT"
+        )
+    options = click.get_current_context().params
+    result = {
+        "query": "climatology",
+        "chunks_per_invocation": chunks_per_invocation,
+        **options,
+        **runs.run(query, tables, **settings),
+    }
     written = objects(chunks)
 
-    expected_chunks = args.chunks_per_invocation * TILES
-    runs.print_run(result, args.concurrency, expected_chunks, CHUNK_BYTES)
+    expected_chunks = chunks_per_invocation * TILES
+    runs.print_run(result, concurrency, expected_chunks, CHUNK_BYTES)
     [row] = result["rows"]
-    print(f"{row['count']:,} rows in {written:,} chunks, expected {CELLS * 24:,} in {TILES:,}")
+    click.echo(f"{row['count']:,} rows in {written:,} chunks, expected {CELLS * 24:,} in {TILES:,}")
     ok = row["count"] == CELLS * 24 and written == TILES
-    print("all as expected" if ok else "PROBLEMS")
+    click.secho("all as expected" if ok else "PROBLEMS", fg="green" if ok else "red")
     saved = runs.save(RESULTS, "climatology", result)
-    if not args.local:
+    if not local:
         runs.report(json.loads(saved.read_text()), saved)
 
 
