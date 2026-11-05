@@ -13,6 +13,7 @@ import pyarrow as pa
 from tqdm import tqdm
 
 from datafusion_lambda_benchmarks._native import Session
+from datafusion_lambda_benchmarks.deploy import PROJECT
 
 
 def location(url: str) -> str:
@@ -35,7 +36,7 @@ def _table(table: Table) -> tuple[str, dict[str, str]]:
 
 def session(tables: dict[str, Table], **settings: Any) -> Session:
     """
-    A session over `tables`, by name. `settings` are
+    A session over `tables`, by name, calling this project's lambdas. `settings` are
     `endpoint_url`, for a local `cargo lambda watch`, `concurrency`,
     `dispatchers` (by default the fewest that hold `concurrency`),
     `chunks_per_invocation`, `chunks_in_flight` (how many of those a
@@ -45,7 +46,9 @@ def session(tables: dict[str, Table], **settings: Any) -> Session:
     with how many of a fan-out's invocations have succeeded and how many it
     has: with none before it invokes, then as they arrive.
     """
-    return Session({name: _table(table) for name, table in tables.items()}, **settings)
+    return Session(
+        {name: _table(table) for name, table in tables.items()}, project=PROJECT, **settings
+    )
 
 
 @dataclass

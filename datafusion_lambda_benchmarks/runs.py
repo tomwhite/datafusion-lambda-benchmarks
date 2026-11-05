@@ -11,12 +11,13 @@ from typing import Any
 
 import boto3
 import numpy as np
+from map_lambda import DISPATCHER, Session
 
 from datafusion_lambda_benchmarks import cost, sql
 from datafusion_lambda_benchmarks.cloudwatch import join, query_all_reports, query_windows
+from datafusion_lambda_benchmarks.deploy import PROJECT
 
 FUNCTION = "fragment"
-DISPATCHER = "dispatcher"
 
 
 def describe(name: str, values: list[float]) -> str:
@@ -132,13 +133,24 @@ def report(result: dict[str, Any], saved: Path) -> None:
     logs = boto3.client("logs", region_name=os.environ.get("AWS_REGION"))
     # the dispatchers' REPORT lines fall in their workers' windows too
     windows = query_windows(result["invocations"])
+    deployed = Session(project=PROJECT)
     workers = join(
         result["invocations"],
-        query_all_reports(logs, FUNCTION, {r["req_id"] for r in result["invocations"]}, windows),
+        query_all_reports(
+            logs,
+            deployed.function_name(FUNCTION),
+            {r["req_id"] for r in result["invocations"]},
+            windows,
+        ),
     )
     dispatchers = join(
         result["dispatchers"],
-        query_all_reports(logs, DISPATCHER, {c["req_id"] for c in result["dispatchers"]}, windows),
+        query_all_reports(
+            logs,
+            deployed.function_name(DISPATCHER),
+            {c["req_id"] for c in result["dispatchers"]},
+            windows,
+        ),
     )
     cold = sum(w["init_ms"] is not None for w in workers)
     print(

@@ -3,15 +3,10 @@ name = "dispatcher"
 version = "0.1.0"
 edition = "2021"
 
-# The dispatcher itself lives in map-lambda, but build and deploy it
-# here so that `cargo lambda watch` can serve it alongside this project's
-# own worker functions.
-# Keep in sync with map-lambda's dispatcher.
-[package.metadata.lambda.deploy]
-memory = 3538
-timeout = 900
+# The dispatcher itself lives in map-lambda, but build it here so that `cargo
+# lambda watch` can serve it alongside this project's own worker functions.
 
 [dependencies]
 lambda_runtime = "1.0.1"
-map-lambda-dispatcher = { git = "file:///Users/tom/workspace/map-lambda", rev = "41d6192" }
+map-lambda-dispatcher = { git = "file:///Users/tom/workspace/map-lambda", rev = "a261b9f" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

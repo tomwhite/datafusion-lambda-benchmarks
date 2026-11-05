@@ -7,14 +7,18 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "boto3>=1.40.61",
-    "map-lambda",
+    "click>=8.1",
+    "map-lambda[deploy]",
     "numpy",
     "pyarrow",
     "tqdm",
 ]
 
+[project.scripts]
+datafusion-lambda-benchmarks = "datafusion_lambda_benchmarks.cli:cli"
+
 [tool.uv.sources]
-map-lambda = { git = "file:///Users/tom/workspace/map-lambda", rev = "41d6192" }
+map-lambda = { git = "file:///Users/tom/workspace/map-lambda", rev = "a261b9f" }
 
 [build-system]
 requires = ["maturin>=1.9,<2"]

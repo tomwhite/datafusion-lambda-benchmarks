@@ -55,6 +55,8 @@ use zarr_datafusion::writer::{create_skeleton, SkeletonSpec, ZarrDataSink};
 /// Where fragments run, and how many at once.
 #[derive(Debug, Clone)]
 pub struct Settings {
+    /// The project the lambdas were deployed as, which prefixes their names on AWS.
+    pub project: Option<String>,
     pub worker_function: String,
     /// Worker invocations in flight.
     pub concurrency: usize,
@@ -77,6 +79,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            project: None,
             worker_function: "fragment".into(),
             concurrency: 1000,
             dispatchers: None,
@@ -112,6 +115,7 @@ impl fmt::Debug for FanOut {
 impl FanOut {
     pub fn new(invoker: Arc<dyn Invoker>, settings: Settings) -> Self {
         let mut calls = map_lambda_client::Settings::default();
+        calls.project = settings.project.clone();
         calls.dispatchers = settings.dispatchers;
         calls.concurrency = settings.concurrency;
         calls.retries = settings.retries;

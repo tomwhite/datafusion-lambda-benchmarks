@@ -35,6 +35,15 @@ wheels = [
 ]
 
 [[package]]
+name = "click"
+version = "8.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c7/0e/7fa0ef50764b67090eca4114772a2abf8b6148198475e54c660b97caeee6/click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34", size = 382235, upload-time = "2026-08-26T13:33:14.56Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360", size = 125251, upload-time = "2026-08-26T13:33:12.928Z" },
+]
+
+[[package]]
 name = "cloudpickle"
 version = "3.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -170,7 +179,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
-    { name = "map-lambda" },
+    { name = "click" },
+    { name = "map-lambda", extra = ["deploy"] },
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "tqdm" },
@@ -189,7 +199,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.40.61" },
-    { name = "map-lambda", git = "file:///Users/tom/workspace/map-lambda?rev=41d6192" },
+    { name = "click", specifier = ">=8.1" },
+    { name = "map-lambda", extras = ["deploy"], git = "file:///Users/tom/workspace/map-lambda?rev=a261b9f" },
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "tqdm" },
@@ -199,7 +210,7 @@ requires-dist = [
 dev = [
     { name = "datafusion", specifier = ">=55.0.0" },
     { name = "icechunk", specifier = ">=2" },
-    { name = "map-lambda", extras = ["diagnostics"], git = "file:///Users/tom/workspace/map-lambda?rev=41d6192" },
+    { name = "map-lambda", extras = ["diagnostics"], git = "file:///Users/tom/workspace/map-lambda?rev=a261b9f" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.5" },
     { name = "zarr", specifier = ">=3" },
@@ -458,9 +469,13 @@ wheels = [
 [[package]]
 name = "map-lambda"
 version = "0.1.0"
-source = { git = "file:///Users/tom/workspace/map-lambda?rev=41d6192#41d61925880eab009ff349f02365d25b238fea2a" }
+source = { git = "file:///Users/tom/workspace/map-lambda?rev=a261b9f#a261b9fd4dc4bb8fc2c24735fc3616a76543d57c" }
 
 [package.optional-dependencies]
+deploy = [
+    { name = "boto3" },
+    { name = "click" },
+]
 diagnostics = [
     { name = "matplotlib" },
 ]

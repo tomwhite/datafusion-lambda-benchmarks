@@ -28,6 +28,7 @@ impl Session {
     #[new]
     #[pyo3(signature = (
         tables,
+        project = None,
         endpoint_url = None,
         concurrency = 1000,
         dispatchers = None,
@@ -42,6 +43,7 @@ impl Session {
     fn new(
         py: Python<'_>,
         tables: HashMap<String, (String, BTreeMap<String, String>)>,
+        project: Option<String>,
         endpoint_url: Option<String>,
         concurrency: usize,
         dispatchers: Option<usize>,
@@ -58,6 +60,7 @@ impl Session {
             .collect::<HashMap<_, _>>();
         let runtime = tokio::runtime::Runtime::new().map_err(err)?;
         let settings = Settings {
+            project,
             concurrency,
             dispatchers,
             endpoint_url,

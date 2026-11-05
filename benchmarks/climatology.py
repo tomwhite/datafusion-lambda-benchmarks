@@ -1,11 +1,10 @@
 """
 The hourly climatology of `t2m` over Earthmover's ERA5 pencils,
 `single/temporal`, written to a Zarr store by the workers, a chunk a tile.
-The workers must be in the bucket's region, and allowed to write to the
-output's:
+The workers must be in the bucket's region, as the deploy spec fixes, and
+allowed to write to the output's:
 
-    OUTPUT_BUCKET=... ./aws/setup-roles.sh
-    AWS_REGION=us-east-1 ./aws/deploy.sh
+    uv run datafusion-lambda-benchmarks deploy --from-source --allow-bucket ...
     eval "$(aws configure export-credentials --format env)"; export AWS_REGION=us-east-1
     uv run python benchmarks/climatology.py s3://.../climatology.zarr
 

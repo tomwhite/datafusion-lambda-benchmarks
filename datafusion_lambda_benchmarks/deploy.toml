@@ -1,0 +1,17 @@
+project = "datafusion-lambda"
+workspace = "../rust"
+# next to ERA5, which a query refuses to read from another region
+region = "us-east-1"
+
+[functions.fragment]
+memory = 1769
+timeout = 300
+
+# for a fragment that writes its output, as the climatology does; ERA5 is read anonymously
+[[functions.fragment.bucket_access]]
+action = ["s3:PutObject", "s3:AbortMultipartUpload", "s3:GetObject", "s3:DeleteObject"]
+resource = "arn:aws:s3:::{bucket}/*"
+
+[[functions.fragment.bucket_access]]
+action = ["s3:ListBucket"]
+resource = "arn:aws:s3:::{bucket}"

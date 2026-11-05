@@ -1,9 +1,9 @@
 """
 The demo: the monthly area-weighted global mean of `t2m` over Earthmover's
 ERA5, an Icechunk repo in us-east-1, fanned out from a window's hourly
-chunks. The workers must be in the bucket's region:
+chunks. The workers must be in the bucket's region, as the deploy spec fixes:
 
-    AWS_REGION=us-east-1 ./aws/deploy.sh
+    uv run datafusion-lambda-benchmarks deploy --from-source
     eval "$(aws configure export-credentials --format env)"; export AWS_REGION=us-east-1
     uv run python benchmarks/demo.py --start 2020-01-01 --end 2020-04-01
 

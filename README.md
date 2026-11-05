@@ -53,15 +53,24 @@ cd rust && cargo test
 
 ## Running on AWS
 
+The lambdas are deployed as the map-lambda project `datafusion-lambda`,
+described by `datafusion_lambda_benchmarks/deploy.toml`: one CloudFormation
+stack holding `datafusion-lambda-dispatcher`, `datafusion-lambda-fragment`,
+their roles and their logs. See map-lambda's README for how a project is
+deployed. Building needs Rust, [Zig](https://ziglang.org/) and
+[cargo lambda](https://www.cargo-lambda.info/).
+
 The data is in us-east-1, so the workers must be there too (a query refuses
-to run otherwise). `OUTPUT_BUCKET` is only needed for the climatology, which
-the workers write to:
+to run otherwise), which the spec fixes. ERA5 is read anonymously, so a
+bucket only needs allowing for the climatology, which the workers write to:
 
 ```shell
-OUTPUT_BUCKET=<bucket> ./aws/setup-roles.sh   # once - wait a few seconds for IAM to apply
-AWS_REGION=us-east-1 ./aws/deploy.sh
-./aws/teardown.sh      # when you're finished
+uv run datafusion-lambda-benchmarks deploy --from-source --allow-bucket <bucket>
+uv run datafusion-lambda-benchmarks list      # what is deployed
+uv run datafusion-lambda-benchmarks delete    # when you're finished; the bucket and its data stay
 ```
+
+Deploy again after any change; the stack remembers the bucket.
 
 The client plans against S3 with credentials from `AWS_*` variables,
 so export as follows:
